@@ -1,0 +1,41 @@
+{
+  "name": "pagebolt",
+  "version": "1.0.0",
+  "description": "Take screenshots, generate PDFs, and create OG images from AI coding assistants.",
+  "homepage": "https://pagebolt.dev",
+  "repository": "https://github.com/Custodia-Admin/pagebolt-mcp",
+  "tools": [
+    {
+      "name": "take_screenshot",
+      "description": "Capture a screenshot of a URL, HTML, or Markdown. 30+ parameters including device emulation, ad blocking, dark mode, geolocation, and more."
+    },
+    {
+      "name": "generate_pdf",
+      "description": "Generate a PDF from a URL or HTML content. Supports A4/Letter/Legal, margins, landscape, and page ranges."
+    },
+    {
+      "name": "create_og_image",
+      "description": "Create Open Graph / social card images from templates or custom HTML."
+    },
+    {
+      "name": "run_sequence",
+      "description": "Multi-step browser automation: navigate, click, fill, screenshot — all in one session."
+    },
+    {
+      "name": "list_devices",
+      "description": "List 25+ device presets for viewport emulation (iPhone, iPad, MacBook, etc.)."
+    },
+    {
+      "name": "check_usage",
+      "description": "Check current API usage and plan limits."
+    }
+  ],
+  "config": {
+    "required": {
+      "PAGEBOLT_API_KEY": "Your PageBolt API key (get one free at https://pagebolt.dev)"
+    },
+    "optional": {
+      "PAGEBOLT_BASE_URL": "API base URL (default: https://pagebolt.dev)"
+    }
+  }
+}

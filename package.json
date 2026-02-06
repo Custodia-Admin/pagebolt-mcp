@@ -1,0 +1,58 @@
+{
+  "name": "pagebolt-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for PageBolt — take screenshots, generate PDFs, and create OG images from AI coding assistants like Claude, Cursor, and Windsurf.",
+  "main": "src/index.mjs",
+  "bin": {
+    "pagebolt-mcp": "src/index.mjs"
+  },
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.mjs"
+  },
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "screenshot",
+    "screenshot-api",
+    "pdf",
+    "pdf-generation",
+    "og-image",
+    "open-graph",
+    "social-card",
+    "browser-automation",
+    "puppeteer",
+    "web-capture",
+    "pagebolt",
+    "ai-tools",
+    "claude",
+    "cursor",
+    "windsurf",
+    "cline",
+    "devtools"
+  ],
+  "author": "PageBolt <hello@pagebolt.dev> (https://pagebolt.dev)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Custodia-Admin/pagebolt-mcp.git"
+  },
+  "homepage": "https://pagebolt.dev",
+  "bugs": {
+    "url": "https://github.com/Custodia-Admin/pagebolt-mcp/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE",
+    "server.json"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "zod": "^4.3.6"
+  }
+}
