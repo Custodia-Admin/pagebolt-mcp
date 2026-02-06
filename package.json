@@ -1,6 +1,6 @@
 {
   "name": "pagebolt-mcp",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "MCP server for PageBolt — take screenshots, generate PDFs, and create OG images from AI coding assistants like Claude, Cursor, and Windsurf.",
   "main": "src/index.mjs",
   "bin": {
@@ -34,6 +34,7 @@
   ],
   "author": "PageBolt <hello@pagebolt.dev> (https://pagebolt.dev)",
   "license": "MIT",
+  "mcpName": "io.github.Custodia-Admin/pagebolt",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Custodia-Admin/pagebolt-mcp.git"
