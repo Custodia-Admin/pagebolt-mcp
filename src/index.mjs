@@ -410,6 +410,10 @@ server.tool(
       style: z.enum(['ripple', 'pulse', 'ring']).optional().describe('Click effect style (default: ripple)'),
       color: z.string().optional().describe('Click effect color as hex'),
     }).optional().describe('Visual click effect settings'),
+    pace: z.union([
+      z.number().min(0.25).max(6),
+      z.enum(['fast', 'normal', 'slow', 'dramatic', 'cinematic']),
+    ]).optional().describe('Controls how deliberate the video feels. Number (0.25–6.0, higher = slower) or preset: "fast" (0.5×), "normal" (1×), "slow" (2×), "dramatic" (3×), "cinematic" (4.5×). Default: "normal".'),
     darkMode: z.boolean().optional().describe('Emulate dark color scheme (default: false)'),
     blockBanners: z.boolean().optional().describe('Hide cookie consent banners (default: true)'),
     deviceScaleFactor: z.number().min(1).max(3).optional().describe('Device pixel ratio (default: 1)'),
@@ -457,6 +461,150 @@ server.tool(
       };
     } catch (err) {
       return { content: [{ type: 'text', text: `Video recording error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// ─── Tool: inspect_page ─────────────────────────────────────────
+server.tool(
+  'inspect_page',
+  'Inspect a web page and get a structured map of all interactive elements, headings, forms, links, and images — each with a unique CSS selector. Use this BEFORE run_sequence to discover what elements exist on the page and get reliable selectors. Returns text (not an image), so it is fast and cheap. Costs 1 API request.',
+  {
+    // ── Source ──
+    url: z.string().url().optional().describe('URL to inspect (required if no html)'),
+    html: z.string().optional().describe('Raw HTML to inspect (required if no url)'),
+    // ── Viewport ──
+    width: z.number().int().min(1).max(3840).optional().describe('Viewport width in pixels (default: 1280)'),
+    height: z.number().int().min(1).max(2160).optional().describe('Viewport height in pixels (default: 720)'),
+    viewportDevice: z.string().optional().describe('Device preset for viewport emulation (e.g. "iphone_14_pro"). Use list_devices to see all presets.'),
+    viewportMobile: z.boolean().optional().describe('Enable mobile meta viewport emulation'),
+    viewportHasTouch: z.boolean().optional().describe('Enable touch event emulation'),
+    deviceScaleFactor: z.number().min(1).max(3).optional().describe('Device pixel ratio (default: 1)'),
+    // ── Timing ──
+    waitUntil: z.enum(['load', 'domcontentloaded', 'networkidle0', 'networkidle2']).optional().describe('When to consider navigation finished (default: networkidle2)'),
+    waitForSelector: z.string().optional().describe('Wait for this CSS selector to appear before inspecting'),
+    // ── Emulation ──
+    darkMode: z.boolean().optional().describe('Emulate dark color scheme (default: false)'),
+    reducedMotion: z.boolean().optional().describe('Emulate prefers-reduced-motion'),
+    userAgent: z.string().optional().describe('Override the browser User-Agent string'),
+    // ── Auth & headers ──
+    cookies: z.array(
+      z.union([
+        z.string(),
+        z.object({
+          name: z.string(),
+          value: z.string(),
+          domain: z.string().optional(),
+        }),
+      ])
+    ).optional().describe('Cookies to set — array of "name=value" strings or { name, value, domain? } objects'),
+    headers: z.record(z.string(), z.string()).optional().describe('Extra HTTP headers to send with the request'),
+    authorization: z.string().optional().describe('Authorization header value (e.g. "Bearer <token>")'),
+    bypassCSP: z.boolean().optional().describe('Bypass Content-Security-Policy on the page'),
+    // ── Content manipulation ──
+    hideSelectors: z.array(z.string()).optional().describe('Array of CSS selectors to hide before inspecting'),
+    blockBanners: z.boolean().optional().describe('Hide cookie consent banners (default: false)'),
+    blockAds: z.boolean().optional().describe('Block advertisements on the page'),
+    blockChats: z.boolean().optional().describe('Block live chat widgets'),
+    blockTrackers: z.boolean().optional().describe('Block tracking scripts'),
+    injectCss: z.string().optional().describe('Custom CSS to inject before inspecting'),
+    injectJs: z.string().optional().describe('Custom JavaScript to execute before inspecting'),
+  },
+  async (params) => {
+    if (!params.url && !params.html) {
+      return { content: [{ type: 'text', text: 'Error: Either "url" or "html" is required.' }], isError: true };
+    }
+
+    try {
+      const res = await callApi('/api/v1/inspect', {
+        method: 'POST',
+        body: params,
+      });
+
+      const data = await res.json();
+
+      // Format as structured text for efficient LLM consumption
+      const lines = [];
+
+      // Header
+      lines.push(`Page: ${data.title || '(untitled)'} (${data.url || params.url || 'html content'})`);
+      if (data.metadata) {
+        if (data.metadata.description) lines.push(`Description: ${data.metadata.description}`);
+        if (data.metadata.lang) lines.push(`Language: ${data.metadata.lang}`);
+        if (data.metadata.httpStatusCode) lines.push(`HTTP Status: ${data.metadata.httpStatusCode}`);
+      }
+      lines.push('');
+
+      // Headings
+      if (data.headings && data.headings.length > 0) {
+        lines.push(`Headings (${data.headings.length}):`);
+        for (const h of data.headings) {
+          lines.push(`  H${h.level}: ${h.text} — selector: ${h.selector}`);
+        }
+        lines.push('');
+      }
+
+      // Interactive elements
+      if (data.elements && data.elements.length > 0) {
+        lines.push(`Interactive Elements (${data.elements.length}):`);
+        for (const el of data.elements) {
+          let desc = `[${el.tag}`;
+          if (el.attributes && el.attributes.type) desc += ` type=${el.attributes.type}`;
+          desc += `]`;
+          if (el.text) desc += ` "${el.text}"`;
+          if (el.attributes && el.attributes.placeholder) desc += ` placeholder="${el.attributes.placeholder}"`;
+          if (el.attributes && el.attributes.href) desc += ` → ${el.attributes.href}`;
+          desc += ` — selector: ${el.selector}`;
+          lines.push(`  ${desc}`);
+        }
+        lines.push('');
+      }
+
+      // Forms
+      if (data.forms && data.forms.length > 0) {
+        lines.push(`Forms (${data.forms.length}):`);
+        for (const f of data.forms) {
+          const method = f.method || 'GET';
+          const action = f.action || '(none)';
+          lines.push(`  ${f.selector} (${method} ${action}): ${f.fields.length} field(s)`);
+          for (const field of f.fields) {
+            lines.push(`    - ${field}`);
+          }
+        }
+        lines.push('');
+      }
+
+      // Links
+      if (data.links && data.links.length > 0) {
+        lines.push(`Links (${data.links.length}):`);
+        for (const l of data.links) {
+          lines.push(`  "${l.text || '(no text)'}" → ${l.href} — selector: ${l.selector}`);
+        }
+        lines.push('');
+      }
+
+      // Images
+      if (data.images && data.images.length > 0) {
+        lines.push(`Images (${data.images.length}):`);
+        for (const img of data.images) {
+          const alt = img.alt ? `"${img.alt}"` : '(no alt)';
+          lines.push(`  ${alt} src=${img.src} — selector: ${img.selector}`);
+        }
+        lines.push('');
+      }
+
+      lines.push(`Duration: ${data.duration_ms}ms`);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: lines.join('\n'),
+          },
+        ],
+      };
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Inspect error: ${err.message}` }], isError: true };
     }
   }
 );

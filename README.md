@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![MCP](https://img.shields.io/badge/MCP-compatible-brightgreen)](https://modelcontextprotocol.io)
 
-Take screenshots, generate PDFs, and create OG images directly from your AI coding assistant.
+Take screenshots, generate PDFs, create OG images, inspect pages, and record demo videos directly from your AI coding assistant.
 
 **Works with Claude Desktop, Cursor, Windsurf, Cline, and any MCP-compatible client.**
 
@@ -22,6 +22,8 @@ PageBolt MCP Server connects your AI assistant to [PageBolt's web capture API](h
 - **Generate PDFs** from URLs or HTML (invoices, reports, docs)
 - **Create OG images** for social cards using templates or custom HTML
 - **Run browser sequences** — multi-step automation (navigate, click, fill, screenshot)
+- **Record demo videos** — browser automation as MP4/WebM/GIF with cursor effects, click animations, and auto-zoom
+- **Inspect pages** — get a structured map of interactive elements with CSS selectors (use before sequences)
 - **List device presets** — 25+ devices (iPhone, iPad, MacBook, Galaxy, etc.)
 - **Check usage** — monitor your API quota in real time
 
@@ -164,6 +166,36 @@ Execute multi-step browser automation.
 - "Go to https://example.com, click the pricing link, then screenshot both pages"
 - "Navigate to the login page, fill in test credentials, submit, and screenshot the dashboard"
 
+### `inspect_page`
+
+Inspect a web page and get a structured map of all interactive elements, headings, forms, links, and images — each with a unique CSS selector.
+
+**Key parameters:** `url`/`html`, `width`, `height`, `viewportDevice`, `darkMode`, `cookies`, `headers`, `authorization`, `blockBanners`, `blockAds`, `waitUntil`, `waitForSelector`
+
+**Example prompts:**
+- "Inspect https://example.com and tell me what buttons and forms are on the page"
+- "What interactive elements are on the login page? I need selectors for a sequence"
+
+**Tip:** Use `inspect_page` before `run_sequence` to discover reliable CSS selectors instead of guessing.
+
+### `record_video`
+
+Record a professional demo video of a multi-step browser automation sequence with cursor effects, click animations, and smooth movement.
+
+**Key parameters:**
+- `steps` — same actions as `run_sequence` (except no screenshot/pdf — the whole sequence is the video)
+- `format` — `mp4`, `webm`, or `gif` (default: mp4; webm/gif require Starter+)
+- `framerate` — 24, 30, or 60 fps (default: 30)
+- `pace` — speed preset: `"fast"`, `"normal"`, `"slow"`, `"dramatic"`, `"cinematic"`, or a number 0.25–6.0
+- `cursor` — style (`highlight`/`circle`/`spotlight`/`dot`), color, size, smoothing
+- `clickEffect` — style (`ripple`/`pulse`/`ring`), color
+- `zoom` — auto-zoom on clicks with configurable level and duration
+- `saveTo` — output file path
+
+**Example prompts:**
+- "Record a video of logging into https://example.com with a spotlight cursor"
+- "Make a demo video of the signup flow at slow pace, save as demo.mp4"
+
 ### `list_devices`
 
 List all 25+ available device presets with viewport dimensions.
@@ -204,7 +236,7 @@ Free plan requires no credit card. Starter and Growth include a 14-day free tria
 
 ## Why PageBolt?
 
-- **5 APIs, one key** — screenshot, PDF, OG image, browser automation, and MCP server. Stop paying for separate tools.
+- **6 APIs, one key** — screenshot, PDF, OG image, browser automation, video recording, page inspection. Stop paying for separate tools.
 - **Clean captures** — automatic ad blocking, cookie banner removal, chat widget suppression, tracker blocking.
 - **25+ device presets** — iPhone SE to Galaxy S24 Ultra, iPad Pro, MacBook, Desktop 4K.
 - **Ship in 5 minutes** — plain HTTP, no SDKs required, works in any language.
