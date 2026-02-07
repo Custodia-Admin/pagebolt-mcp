@@ -146,7 +146,7 @@ server.tool(
         }),
       ])
     ).optional().describe('Cookies to set — array of "name=value" strings or { name, value, domain? } objects'),
-    headers: z.record(z.string()).optional().describe('Extra HTTP headers to send with the request'),
+    headers: z.record(z.string(), z.string()).optional().describe('Extra HTTP headers to send with the request'),
     authorization: z.string().optional().describe('Authorization header value (e.g. "Bearer <token>")'),
     bypassCSP: z.boolean().optional().describe('Bypass Content-Security-Policy on the page'),
     // ── Content manipulation ──

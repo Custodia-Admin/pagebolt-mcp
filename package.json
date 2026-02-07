@@ -1,6 +1,6 @@
 {
   "name": "pagebolt-mcp",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "MCP server for PageBolt — take screenshots, generate PDFs, create OG images, and record demo videos from AI coding assistants like Claude, Cursor, and Windsurf.",
   "main": "src/index.mjs",
   "module": "src/index.mjs",
