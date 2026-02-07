@@ -212,6 +212,38 @@ Check your current API usage and plan limits.
 
 ---
 
+## Prompts
+
+Pre-built prompt templates for common workflows. In clients that support MCP prompts, these appear as slash commands.
+
+### `/capture-page`
+
+Capture a clean screenshot of any URL with sensible defaults (blocks banners, ads, chats, trackers).
+
+**Arguments:** `url` (required), `device`, `dark_mode`, `full_page`
+
+### `/record-demo`
+
+Record a professional demo video. The agent inspects the page first to discover selectors, then builds a video recording sequence.
+
+**Arguments:** `url` (required), `description` (required — what the demo should show), `pace`, `format`
+
+### `/audit-page`
+
+Inspect a page and get a structured analysis of its elements, forms, links, headings, and potential issues.
+
+**Arguments:** `url` (required)
+
+---
+
+## Resources
+
+### `pagebolt://api-docs`
+
+The full PageBolt API reference as a text resource. AI agents that support MCP resources can read this for detailed parameter documentation beyond what fits in tool descriptions. Content is fetched from the live `llms-full.txt` endpoint.
+
+---
+
 ## Configuration
 
 | Environment Variable | Required | Default | Description |

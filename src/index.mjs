@@ -75,13 +75,78 @@ function imageMimeType(format) {
   return map[format] || 'image/png';
 }
 
+// ─── Server Instructions ────────────────────────────────────────
+// Sent to the AI agent on connection so it knows how to use the tools.
+const SERVER_INSTRUCTIONS = `
+PageBolt gives you 8 tools for web capture and browser automation. All tools use your API key automatically.
+
+## Tools Overview
+
+| Tool | What it does | Cost |
+|------|-------------|------|
+| take_screenshot | Capture a URL, HTML, or Markdown as PNG/JPEG/WebP | 1 request |
+| generate_pdf | Convert a URL or HTML to PDF, saves to disk | 1 request |
+| create_og_image | Generate social card images from templates or custom HTML | 1 request |
+| run_sequence | Multi-step browser automation with multiple screenshot/PDF outputs | 1 request per output |
+| record_video | Record browser automation as MP4/WebM/GIF with cursor effects | 3 requests |
+| inspect_page | Get structured map of page elements with CSS selectors | 1 request |
+| list_devices | List 25+ device presets (iPhone, iPad, MacBook, etc.) | 0 (free) |
+| check_usage | Check current API usage and plan limits | 0 (free) |
+
+## Key Workflow: Inspect Before You Interact
+
+When building sequences or videos, ALWAYS use inspect_page first to discover reliable CSS selectors:
+
+1. inspect_page — returns buttons, inputs, forms, links, headings with unique selectors
+2. run_sequence or record_video — use the selectors from step 1
+
+This avoids guessing selectors like "#submit" when the actual element is "#submitBtn".
+
+## Common Parameters (available on most tools)
+
+- blockBanners: true — hides cookie consent banners (GDPR popups, OneTrust, CookieBot, etc.)
+- blockAds: true — blocks advertisements
+- blockChats: true — blocks live chat widgets (Intercom, Crisp, Drift)
+- blockTrackers: true — blocks analytics trackers (GA, Hotjar, Segment)
+- darkMode: true — emulates dark color scheme (prefers-color-scheme: dark)
+- viewportDevice: "iphone_14_pro" — emulates a specific device (use list_devices to see all 25+)
+
+Use blockBanners on almost every request to get clean captures. Combine blockAds + blockChats + blockTrackers for completely clean screenshots.
+
+## Tips
+
+- For screenshots of pages behind auth: use cookies, headers, or authorization params
+- extractMetadata: true on take_screenshot returns title, description, OG tags, HTTP status
+- response_type: "json" returns base64 data instead of binary (useful for programmatic use)
+- record_video pace presets: "fast" (0.5x), "normal" (1x), "slow" (2x), "dramatic" (3x), "cinematic" (4.5x)
+- record_video cursor styles: "highlight", "circle", "spotlight", "dot"
+- run_sequence requires at least 1 screenshot or pdf step as output
+- record_video does NOT allow screenshot/pdf steps — the whole sequence IS the video
+- Max 2 evaluate (JavaScript) steps per sequence/video
+- fullPage: true on screenshots captures the entire scrollable page
+- fullPageScroll: true triggers lazy-loaded images before capture
+
+## Cost Summary
+
+| Action | Cost |
+|--------|------|
+| Screenshot, PDF, OG image, Inspect | 1 request each |
+| Sequence | 1 request per output (screenshot/pdf) |
+| Video recording | 3 requests flat |
+| list_devices, check_usage | Free |
+`.trim();
+
 // ─── Create MCP Server ──────────────────────────────────────────
 function createConfiguredServer() {
   const srv = new McpServer({
     name: 'pagebolt',
-    version: '1.0.0',
+    version: '1.3.0',
+  }, {
+    instructions: SERVER_INSTRUCTIONS,
   });
   registerTools(srv);
+  registerPrompts(srv);
+  registerResources(srv);
   return srv;
 }
 
@@ -667,6 +732,174 @@ server.tool(
 );
 
 } // end registerTools
+
+// ─── Prompts ────────────────────────────────────────────────────
+function registerPrompts(server) {
+
+  // ── Prompt: capture-page ──────────────────────────────────────
+  server.prompt(
+    'capture-page',
+    'Capture a clean screenshot of any URL with sensible defaults. Optionally inspects the page first.',
+    {
+      url: z.string().describe('The URL to capture'),
+      device: z.string().optional().describe('Device preset, e.g. "iphone_14_pro" or "macbook_pro_14"'),
+      dark_mode: z.enum(['true', 'false']).optional().describe('Enable dark mode (default: false)'),
+      full_page: z.enum(['true', 'false']).optional().describe('Capture the full scrollable page (default: false)'),
+    },
+    (args) => {
+      const device = args.device ? `\n- Use device preset: ${args.device}` : '';
+      const dark = args.dark_mode === 'true' ? '\n- Enable dark mode' : '';
+      const full = args.full_page === 'true' ? '\n- Capture the full scrollable page' : '';
+
+      return {
+        messages: [
+          {
+            role: 'user',
+            content: {
+              type: 'text',
+              text: `Take a clean screenshot of ${args.url} with these settings:
+- Block banners, ads, chats, and trackers for a clean capture${device}${dark}${full}
+- Use PNG format
+- If the page looks complex or you need to verify elements, run inspect_page first
+
+Call take_screenshot with:
+  url: "${args.url}"
+  blockBanners: true
+  blockAds: true
+  blockChats: true
+  blockTrackers: true${args.device ? `\n  viewportDevice: "${args.device}"` : ''}${args.dark_mode === 'true' ? '\n  darkMode: true' : ''}${args.full_page === 'true' ? '\n  fullPage: true\n  fullPageScroll: true' : ''}`,
+            },
+          },
+        ],
+      };
+    }
+  );
+
+  // ── Prompt: record-demo ───────────────────────────────────────
+  server.prompt(
+    'record-demo',
+    'Record a professional demo video of a web page or flow. Generates a step sequence automatically.',
+    {
+      url: z.string().describe('The starting URL to record'),
+      description: z.string().describe('What the demo should show, e.g. "Sign in and explore the dashboard"'),
+      pace: z.enum(['fast', 'normal', 'slow', 'dramatic', 'cinematic']).optional().describe('Video pace preset (default: normal)'),
+      format: z.enum(['mp4', 'webm', 'gif']).optional().describe('Output format (default: mp4)'),
+    },
+    (args) => {
+      const pace = args.pace || 'normal';
+      const format = args.format || 'mp4';
+
+      return {
+        messages: [
+          {
+            role: 'user',
+            content: {
+              type: 'text',
+              text: `Record a professional demo video. Here's what I need:
+
+**Starting URL:** ${args.url}
+**What to demo:** ${args.description}
+**Pace:** ${pace}
+**Format:** ${format}
+
+Please follow this workflow:
+
+1. First, call inspect_page on ${args.url} (with blockBanners: true) to discover the page structure and get reliable CSS selectors.
+
+2. Based on the inspection results and the description above, plan a sequence of steps (navigate, click, fill, scroll, wait, etc.) that demonstrates the described flow.
+
+3. Call record_video with:
+   - The planned steps array
+   - format: "${format}"
+   - pace: "${pace}"
+   - blockBanners: true
+   - cursor: { style: "spotlight", color: "#6366f1" }
+   - clickEffect: { style: "ripple", color: "#6366f1" }
+
+Important tips:
+- Use selectors from the inspect_page results — never guess selectors
+- Add scroll actions between sections to show content naturally
+- Use wait_for after navigation to ensure the page loads
+- Keep to 15 steps or fewer for best results
+- Each video costs 3 API requests`,
+            },
+          },
+        ],
+      };
+    }
+  );
+
+  // ── Prompt: audit-page ────────────────────────────────────────
+  server.prompt(
+    'audit-page',
+    'Inspect a page and return a structured analysis of its elements, forms, links, and interactive components.',
+    {
+      url: z.string().describe('The URL to audit'),
+    },
+    (args) => {
+      return {
+        messages: [
+          {
+            role: 'user',
+            content: {
+              type: 'text',
+              text: `Perform a structured audit of ${args.url}.
+
+1. Call inspect_page with:
+   - url: "${args.url}"
+   - blockBanners: true
+   - blockAds: true
+
+2. Analyze the results and provide a clear summary:
+   - **Page overview:** Title, description, language, HTTP status
+   - **Navigation:** List all nav links with their destinations
+   - **Forms:** List all forms with their fields and actions
+   - **Interactive elements:** Buttons, dropdowns, toggles with their selectors
+   - **Headings:** Document outline (h1-h6 hierarchy)
+   - **Images:** Count and list images missing alt text
+   - **Potential issues:** Missing form labels, broken links, accessibility concerns
+
+3. If this page will be used for automation (sequence/video), list the most useful CSS selectors the user should know about.`,
+            },
+          },
+        ],
+      };
+    }
+  );
+
+} // end registerPrompts
+
+// ─── Resources ──────────────────────────────────────────────────
+function registerResources(server) {
+
+  // ── Resource: pagebolt://api-docs ─────────────────────────────
+  server.resource(
+    'api-docs',
+    'pagebolt://api-docs',
+    { description: 'Complete PageBolt API reference with all endpoints, parameters, examples, and plan limits. Read this for detailed documentation beyond tool descriptions.', mimeType: 'text/plain' },
+    async () => {
+      // Serve a comprehensive API reference. In production this is baked in;
+      // we could also fetch /llms-full.txt but embedding avoids a network call.
+      try {
+        const res = await fetch(`${BASE_URL}/llms-full.txt`);
+        if (res.ok) {
+          const text = await res.text();
+          return { contents: [{ uri: 'pagebolt://api-docs', text, mimeType: 'text/plain' }] };
+        }
+      } catch (_) {
+        // fall through to embedded fallback
+      }
+      return {
+        contents: [{
+          uri: 'pagebolt://api-docs',
+          text: 'Full API docs available at https://pagebolt.dev/docs or https://pagebolt.dev/llms-full.txt',
+          mimeType: 'text/plain',
+        }],
+      };
+    }
+  );
+
+} // end registerResources
 
 // ─── Smithery sandbox export (for scanning tools without credentials) ─
 export function createSandboxServer() {
