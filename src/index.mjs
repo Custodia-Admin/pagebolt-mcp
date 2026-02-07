@@ -29,21 +29,18 @@ import { resolve } from 'node:path';
 const API_KEY = process.env.PAGEBOLT_API_KEY;
 const BASE_URL = (process.env.PAGEBOLT_BASE_URL || 'https://pagebolt.dev').replace(/\/$/, '');
 
-if (!API_KEY) {
-  console.error(
-    'ERROR: PAGEBOLT_API_KEY environment variable is required.\n\n' +
-    'Get your free API key at https://pagebolt.dev\n\n' +
-    'Then set it in your MCP client config:\n\n' +
-    '  Claude Desktop (~/.claude/claude_desktop_config.json):\n' +
-    '    "env": { "PAGEBOLT_API_KEY": "pf_live_..." }\n\n' +
-    '  Cursor (.cursor/mcp.json):\n' +
-    '    "env": { "PAGEBOLT_API_KEY": "pf_live_..." }\n'
-  );
-  process.exit(1);
+function requireApiKey() {
+  if (!API_KEY) {
+    throw new Error(
+      'PAGEBOLT_API_KEY environment variable is required. ' +
+      'Get your free API key at https://pagebolt.dev'
+    );
+  }
 }
 
 // ─── HTTP helper ─────────────────────────────────────────────────
 async function callApi(endpoint, options = {}) {
+  requireApiKey();
   const url = `${BASE_URL}${endpoint}`;
   const method = options.method || 'GET';
   const headers = {
@@ -79,10 +76,18 @@ function imageMimeType(format) {
 }
 
 // ─── Create MCP Server ──────────────────────────────────────────
-const server = new McpServer({
-  name: 'pagebolt',
-  version: '1.0.0',
-});
+function createConfiguredServer() {
+  const srv = new McpServer({
+    name: 'pagebolt',
+    version: '1.0.0',
+  });
+  registerTools(srv);
+  return srv;
+}
+
+const server = createConfiguredServer();
+
+function registerTools(server) {
 
 // ─── Tool: take_screenshot ──────────────────────────────────────
 server.tool(
@@ -360,6 +365,102 @@ server.tool(
   }
 );
 
+// ─── Tool: record_video ─────────────────────────────────────────
+server.tool(
+  'record_video',
+  'Record a professional demo video of a multi-step browser automation sequence. Produces MP4/WebM/GIF with automatic cursor highlighting, click ripple effects, smooth cursor movement, and auto-zoom on clicks (Cursorful-style). Each video costs 3 API requests. Saves to disk and returns the file path.',
+  {
+    steps: z.array(
+      z.object({
+        action: z.enum([
+          'navigate', 'click', 'fill', 'select', 'hover',
+          'scroll', 'wait', 'wait_for', 'evaluate',
+        ]).describe('The action to perform (no screenshot/pdf — the whole sequence is recorded as video)'),
+        url: z.string().url().optional().describe('URL to navigate to (for navigate action)'),
+        selector: z.string().optional().describe('CSS selector for the target element'),
+        value: z.string().optional().describe('Value to type or select'),
+        ms: z.number().int().min(0).max(10000).optional().describe('Milliseconds to wait (for wait action)'),
+        timeout: z.number().int().min(0).max(15000).optional().describe('Timeout in ms for wait_for (default: 10000)'),
+        x: z.number().optional().describe('Horizontal scroll position'),
+        y: z.number().optional().describe('Vertical scroll position'),
+        script: z.string().max(5000).optional().describe('JavaScript to execute in page context (for evaluate action)'),
+      })
+    ).min(1).max(50).describe('Array of steps to execute and record. Max steps depends on plan (10-50).'),
+    viewport: z.object({
+      width: z.number().int().min(320).max(3840).optional().describe('Viewport width (default: 1280)'),
+      height: z.number().int().min(200).max(2160).optional().describe('Viewport height (default: 720)'),
+    }).optional().describe('Browser viewport size'),
+    format: z.enum(['mp4', 'webm', 'gif']).optional().describe('Video format (default: mp4). webm/gif require Starter+ plan.'),
+    framerate: z.number().int().optional().describe('Frames per second: 24, 30, or 60 (default: 30)'),
+    cursor: z.object({
+      visible: z.boolean().optional().describe('Show cursor overlay (default: true)'),
+      style: z.enum(['highlight', 'circle', 'spotlight', 'dot']).optional().describe('Cursor style (default: highlight)'),
+      color: z.string().optional().describe('Cursor color as hex, e.g. "#3B82F6" (default: blue)'),
+      size: z.number().int().min(8).max(60).optional().describe('Cursor size in pixels (default: 20)'),
+      smoothing: z.boolean().optional().describe('Smooth animated cursor movement (default: true)'),
+    }).optional().describe('Cursor appearance settings'),
+    zoom: z.object({
+      enabled: z.boolean().optional().describe('Auto-zoom on clicks (default: true)'),
+      level: z.number().min(1.5).max(4).optional().describe('Zoom magnification (default: 2.0)'),
+      duration: z.number().int().min(200).max(2000).optional().describe('Zoom animation duration in ms (default: 600)'),
+    }).optional().describe('Auto-zoom settings for click actions'),
+    autoZoom: z.boolean().optional().describe('Shorthand: set to true to enable auto-zoom with defaults (same as zoom.enabled=true)'),
+    clickEffect: z.object({
+      enabled: z.boolean().optional().describe('Show click ripple effects (default: true)'),
+      style: z.enum(['ripple', 'pulse', 'ring']).optional().describe('Click effect style (default: ripple)'),
+      color: z.string().optional().describe('Click effect color as hex'),
+    }).optional().describe('Visual click effect settings'),
+    darkMode: z.boolean().optional().describe('Emulate dark color scheme (default: false)'),
+    blockBanners: z.boolean().optional().describe('Hide cookie consent banners (default: true)'),
+    deviceScaleFactor: z.number().min(1).max(3).optional().describe('Device pixel ratio (default: 1)'),
+    saveTo: z.string().optional().describe('Output file path (default: ./recording.mp4)'),
+  },
+  async (params) => {
+    if (!params.steps || params.steps.length === 0) {
+      return { content: [{ type: 'text', text: 'Error: "steps" must be a non-empty array.' }], isError: true };
+    }
+
+    try {
+      const { saveTo, ...apiParams } = params;
+
+      const res = await callApi('/api/v1/video', {
+        method: 'POST',
+        body: { ...apiParams, response_type: 'json' },
+      });
+
+      const data = await res.json();
+      const format = params.format || 'mp4';
+      const ext = format === 'gif' ? 'gif' : format;
+      const outputPath = resolve(saveTo || `./recording.${ext}`);
+
+      // Decode base64 and write to disk
+      const buffer = Buffer.from(data.data, 'base64');
+      writeFileSync(outputPath, buffer);
+
+      const durationSec = (data.duration_ms / 1000).toFixed(1);
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Video recorded successfully.\n` +
+              `  File:     ${outputPath}\n` +
+              `  Format:   ${data.format}\n` +
+              `  Size:     ${(data.size_bytes / 1024).toFixed(1)} KB\n` +
+              `  Duration: ${durationSec}s\n` +
+              `  Frames:   ${data.frames}\n` +
+              `  Steps:    ${data.steps_completed}/${data.total_steps} completed\n` +
+              `  Cost:     ${data.usage.video_cost} API requests\n` +
+              `  Remaining: ${data.usage.remaining} requests`,
+          },
+        ],
+      };
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Video recording error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
 // ─── Tool: list_devices ─────────────────────────────────────────
 server.tool(
   'list_devices',
@@ -417,6 +518,16 @@ server.tool(
   }
 );
 
+} // end registerTools
+
+// ─── Smithery sandbox export (for scanning tools without credentials) ─
+export function createSandboxServer() {
+  return createConfiguredServer();
+}
+
 // ─── Start ──────────────────────────────────────────────────────
-const transport = new StdioServerTransport();
-await server.connect(transport);
+async function main() {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
+main();
