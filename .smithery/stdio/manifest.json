@@ -1,0 +1,17 @@
+{
+  "type": "stdio",
+  "runtime": "node",
+  "serverCard": {
+    "serverInfo": {
+      "name": "pagebolt",
+      "version": "1.0.0"
+    },
+    "tools": [],
+    "resources": [],
+    "prompts": []
+  },
+  "source": {
+    "commit": "62f5b94bd15f436f56ef098fcaf40cc268e176cb",
+    "branch": "main"
+  }
+}

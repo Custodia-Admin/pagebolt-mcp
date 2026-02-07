@@ -1,0 +1,30 @@
+{
+  "manifest_version": "0.2",
+  "name": "pagebolt",
+  "version": "1.0.0",
+  "description": "MCP Server",
+  "author": {
+    "name": "Smithery"
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "index.cjs",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/index.cjs"
+      ],
+      "env": {}
+    }
+  },
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  }
+}
