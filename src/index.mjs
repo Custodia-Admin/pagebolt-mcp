@@ -57,7 +57,7 @@ async function callApi(endpoint, options = {}) {
   const method = options.method || 'GET';
   const headers = {
     'x-api-key': API_KEY,
-    'user-agent': 'pagebolt-mcp/1.5.1',
+    'user-agent': 'pagebolt-mcp/1.5.2',
     ...(options.body ? { 'Content-Type': 'application/json' } : {}),
   };
 
