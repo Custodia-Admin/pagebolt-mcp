@@ -57,7 +57,7 @@ async function callApi(endpoint, options = {}) {
   const method = options.method || 'GET';
   const headers = {
     'x-api-key': API_KEY,
-    'user-agent': 'pagebolt-mcp/1.4.0',
+    'user-agent': 'pagebolt-mcp/1.5.1',
     ...(options.body ? { 'Content-Type': 'application/json' } : {}),
   };
 
@@ -378,17 +378,37 @@ server.tool(
     });
 
     const data = await res.json();
-    const outputPath = safePath(saveTo, './output.pdf');
 
-    const buffer = Buffer.from(data.data, 'base64');
-    writeFileSync(outputPath, buffer);
+    // Best-effort save to disk (may fail in hosted/sandboxed environments)
+    let savedPath = null;
+    try {
+      const outputPath = safePath(saveTo, './output.pdf');
+      const buffer = Buffer.from(data.data, 'base64');
+      writeFileSync(outputPath, buffer);
+      savedPath = outputPath;
+    } catch (_diskErr) {
+      // Disk write failed (e.g. hosted environment, read-only FS) — data is
+      // still returned as an embedded resource below, so the client gets it.
+    }
+
+    const fileNote = savedPath
+      ? `  File: ${savedPath}`
+      : `  File: (not saved to disk — use the embedded resource data below)`;
 
     return {
       content: [
         {
+          type: 'resource',
+          resource: {
+            uri: 'pagebolt://pdf/output.pdf',
+            mimeType: 'application/pdf',
+            blob: data.data,   // base64-encoded PDF — always delivered to client
+          },
+        },
+        {
           type: 'text',
           text: `PDF generated successfully.\n` +
-            `  File: ${outputPath}\n` +
+            `${fileNote}\n` +
             `  Size: ${data.size_bytes} bytes\n` +
             `  Duration: ${data.duration_ms}ms`,
         },
@@ -648,19 +668,42 @@ server.tool(
       const data = await res.json();
       const format = params.format || 'mp4';
       const ext = format === 'gif' ? 'gif' : format;
-      const outputPath = safePath(saveTo, `./recording.${ext}`);
 
-      const buffer = Buffer.from(data.data, 'base64');
-      writeFileSync(outputPath, buffer);
+      // Determine video MIME type
+      const videoMimeTypes = { mp4: 'video/mp4', webm: 'video/webm', gif: 'image/gif' };
+      const mimeType = videoMimeTypes[ext] || 'video/mp4';
+
+      // Best-effort save to disk (may fail in hosted/sandboxed environments)
+      let savedPath = null;
+      try {
+        const outputPath = safePath(saveTo, `./recording.${ext}`);
+        const buffer = Buffer.from(data.data, 'base64');
+        writeFileSync(outputPath, buffer);
+        savedPath = outputPath;
+      } catch (_diskErr) {
+        // Disk write failed (e.g. hosted environment, read-only FS) — data is
+        // still returned as an embedded resource below, so the client gets it.
+      }
 
       const durationSec = (data.duration_ms / 1000).toFixed(1);
+      const fileNote = savedPath
+        ? `  File:     ${savedPath}\n`
+        : `  File:     (not saved to disk — use the embedded resource data below)\n`;
 
       return {
         content: [
           {
+            type: 'resource',
+            resource: {
+              uri: `pagebolt://video/recording.${ext}`,
+              mimeType,
+              blob: data.data,   // base64-encoded video — always delivered to client
+            },
+          },
+          {
             type: 'text',
             text: `Video recorded successfully.\n` +
-              `  File:     ${outputPath}\n` +
+              fileNote +
               `  Format:   ${data.format}\n` +
               `  Size:     ${(data.size_bytes / 1024).toFixed(1)} KB\n` +
               `  Duration: ${durationSec}s\n` +
