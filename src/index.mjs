@@ -1,29 +1,41 @@
 #!/usr/bin/env node
 
 /**
- * PageBolt MCP Server
+ * PageBolt MCP Server — COMPLETE API coverage
  *
- * A Model Context Protocol (MCP) server that exposes PageBolt's
- * screenshot, PDF, and OG image APIs as tools for AI coding assistants
- * (Claude Desktop, Cursor, Windsurf, Cline, etc.).
+ * A Model Context Protocol (MCP) server that exposes 100% of PageBolt's
+ * API as tools for AI coding assistants (Claude, Cursor, Windsurf, Cline).
+ *
+ * Every parameter from every endpoint is exposed. Nothing is hidden.
  *
  * Get your free API key at https://pagebolt.dev
  *
  * Configuration (environment variables):
  *   PAGEBOLT_API_KEY   — Required. Your PageBolt API key.
  *   PAGEBOLT_BASE_URL  — Optional. Defaults to https://pagebolt.dev
- *
- * Usage:
- *   npx pagebolt-mcp
- *   # or after global install:
- *   pagebolt-mcp
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { resolve, relative, isAbsolute } from 'node:path';
+
+/**
+ * Validate that a saveTo path stays within the current working directory.
+ * Prevents path traversal attacks (e.g., saveTo: "/etc/cron.d/malicious").
+ */
+function safePath(userPath, defaultName) {
+  const resolved = resolve(userPath || defaultName);
+  const rel = relative(process.cwd(), resolved);
+  if (isAbsolute(rel) || rel.startsWith('..')) {
+    throw new Error(
+      `saveTo path must be within the current working directory. ` +
+      `Got "${userPath}", which resolves outside CWD (${process.cwd()}).`
+    );
+  }
+  return resolved;
+}
 
 // ─── Configuration ───────────────────────────────────────────────
 const API_KEY = process.env.PAGEBOLT_API_KEY;
@@ -45,7 +57,7 @@ async function callApi(endpoint, options = {}) {
   const method = options.method || 'GET';
   const headers = {
     'x-api-key': API_KEY,
-    'user-agent': 'pagebolt-mcp/1.0.0',
+    'user-agent': 'pagebolt-mcp/1.4.0',
     ...(options.body ? { 'Content-Type': 'application/json' } : {}),
   };
 
@@ -75,8 +87,50 @@ function imageMimeType(format) {
   return map[format] || 'image/png';
 }
 
+// ─── Reusable Zod schemas ────────────────────────────────────────
+// These are shared across multiple tools.
+
+const cookieSchema = z.union([
+  z.string(),
+  z.object({
+    name: z.string(),
+    value: z.string(),
+    domain: z.string().optional(),
+  }),
+]);
+
+/** Screenshot style / theme options (frame, background, shadow, etc.) */
+const styleSchema = z.object({
+  theme: z.enum([
+    'notion', 'paper', 'vercel', 'glass', 'ocean', 'sunset',
+    'linear', 'arc', 'glassDark', 'glassWarm', 'spotlight',
+    'neonBlue', 'neonPurple', 'neonGreen', 'lavender', 'ember', 'dots', 'grid',
+  ]).optional().describe(
+    'One-click theme preset. Applies curated frame + background + shadow + padding. ' +
+    'Free themes: notion, paper, vercel, glass, ocean, sunset. ' +
+    'Paid (Starter+): linear, arc, glassDark, glassWarm, spotlight, neonBlue, neonPurple, neonGreen, lavender, ember, dots, grid. ' +
+    'Individual properties below override the theme defaults.'
+  ),
+  frame: z.enum(['macos', 'windows', 'minimal', 'none']).optional().describe('Window chrome style. macos = traffic lights, windows = min/max/close, minimal = dots only, none = no frame.'),
+  frameTheme: z.enum(['light', 'dark', 'auto']).optional().describe('Frame color theme (default: auto)'),
+  background: z.enum([
+    'ocean', 'sunset', 'forest', 'midnight', 'aurora', 'lavender', 'peach', 'arctic', 'ember', 'slate', 'neon',
+    'glass', 'solid', 'spotlight', 'dots', 'grid', 'noise', 'none',
+  ]).optional().describe(
+    'Background style. Gradients: ocean, sunset, forest, midnight, aurora, lavender, peach, arctic, ember, slate, neon. ' +
+    'Special: glass (frosted glass effect), solid, spotlight, dots, grid, noise. none = transparent.'
+  ),
+  bgColor: z.string().optional().describe('Background color as hex (e.g. "#1e3a5f"). Used for solid backgrounds or as base for patterns.'),
+  bgColors: z.array(z.string()).optional().describe('Array of 2 hex colors for custom gradient (e.g. ["#1e3a5f", "#7c3aed"])'),
+  padding: z.number().int().min(0).max(120).optional().describe('Padding around screenshot in pixels (default: 40)'),
+  borderRadius: z.number().int().min(0).max(40).optional().describe('Corner radius in pixels (default: 12)'),
+  shadow: z.enum(['none', 'xs', 'sm', 'md', 'lg', 'xl', '2xl']).optional().describe('Drop shadow size (default: md)'),
+}).optional().describe(
+  'Screenshot styling options — add a macOS/Windows frame, gradient/glass background, shadow, and rounded corners. ' +
+  'Use the "theme" shortcut for one-click presets, or customize individual properties.'
+);
+
 // ─── Server Instructions ────────────────────────────────────────
-// Sent to the AI agent on connection so it knows how to use the tools.
 const SERVER_INSTRUCTIONS = `
 PageBolt gives you 8 tools for web capture and browser automation. All tools use your API key automatically.
 
@@ -102,6 +156,23 @@ When building sequences or videos, ALWAYS use inspect_page first to discover rel
 
 This avoids guessing selectors like "#submit" when the actual element is "#submitBtn".
 
+## Styling Screenshots
+
+Use the "style" parameter on take_screenshot for beautiful styled captures:
+- Quick: style.theme = "glass" or "ocean" or "linear" for one-click presets
+- Custom: style.frame = "macos", style.background = "glass", style.shadow = "lg"
+
+## Video Recording Features
+
+record_video supports polished video output:
+- frame: { enabled: true, style: "macos" } — browser chrome around the video
+- background: { enabled: true, type: "gradient", gradient: "ocean" } — gradient/glass background with padding
+- cursor: { style: "classic", persist: true } — always-visible cursor
+- Per-step zoom: add zoom: { enabled: true } on click steps
+- **Step notes (IMPORTANT)**: Add a "note" field to EVERY action step for guided-tour-style tooltip annotations. Notes appear as beautiful styled tooltips near the element being interacted with. Example: { action: "click", selector: "#btn", note: "Click here to open settings" }. The only steps that should NOT have notes are wait/wait_for pauses.
+- **Live wait steps**: Add live: true to wait steps to capture animated content (transitions, loading spinners) instead of freezing the last frame.
+- **Variables**: Pass variables: { "base_url": "https://example.com" } and use {{base_url}} in step URLs/values for reusable recordings.
+
 ## Common Parameters (available on most tools)
 
 - blockBanners: true — hides cookie consent banners (GDPR popups, OneTrust, CookieBot, etc.)
@@ -119,7 +190,7 @@ Use blockBanners on almost every request to get clean captures. Combine blockAds
 - extractMetadata: true on take_screenshot returns title, description, OG tags, HTTP status
 - response_type: "json" returns base64 data instead of binary (useful for programmatic use)
 - record_video pace presets: "fast" (0.5x), "normal" (1x), "slow" (2x), "dramatic" (3x), "cinematic" (4.5x)
-- record_video cursor styles: "highlight", "circle", "spotlight", "dot"
+- record_video cursor styles: "highlight", "circle", "spotlight", "dot", "classic"
 - run_sequence requires at least 1 screenshot or pdf step as output
 - record_video does NOT allow screenshot/pdf steps — the whole sequence IS the video
 - Max 2 evaluate (JavaScript) steps per sequence/video
@@ -140,7 +211,7 @@ Use blockBanners on almost every request to get clean captures. Combine blockAds
 function createConfiguredServer() {
   const srv = new McpServer({
     name: 'pagebolt',
-    version: '1.3.0',
+    version: '1.5.0',
   }, {
     instructions: SERVER_INSTRUCTIONS,
   });
@@ -154,10 +225,12 @@ const server = createConfiguredServer();
 
 function registerTools(server) {
 
-// ─── Tool: take_screenshot ──────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// Tool: take_screenshot — COMPLETE coverage
+// ═══════════════════════════════════════════════════════════════════
 server.tool(
   'take_screenshot',
-  'Capture a screenshot of a URL, HTML, or Markdown content. 30+ parameters including device emulation, ad/chat/tracker blocking, metadata extraction, geolocation, timezone, and more. Returns an image (PNG, JPEG, or WebP).',
+  'Capture a screenshot of a URL, HTML, or Markdown content. Supports device emulation, ad/chat/tracker blocking, metadata extraction, geolocation, timezone, styling (macOS/Windows frames, gradient/glass backgrounds, shadows), and more. Returns an image (PNG, JPEG, or WebP).',
   {
     // ── Source ──
     url: z.string().url().optional().describe('URL to capture (required if no html/markdown)'),
@@ -169,6 +242,7 @@ server.tool(
     viewportDevice: z.string().optional().describe('Device preset for viewport emulation (e.g. "iphone_14_pro", "macbook_pro_14"). Use list_devices to see all presets.'),
     viewportMobile: z.boolean().optional().describe('Enable mobile meta viewport emulation'),
     viewportHasTouch: z.boolean().optional().describe('Enable touch event emulation'),
+    viewportLandscape: z.boolean().optional().describe('Landscape orientation'),
     deviceScaleFactor: z.number().min(1).max(3).optional().describe('Device pixel ratio, use 2 for retina (default: 1)'),
     // ── Output format ──
     format: z.enum(['png', 'jpeg', 'webp']).optional().describe('Image format (default: png)'),
@@ -177,6 +251,8 @@ server.tool(
     // ── Capture region ──
     fullPage: z.boolean().optional().describe('Capture the full scrollable page (default: false)'),
     fullPageScroll: z.boolean().optional().describe('Auto-scroll page before capture to trigger lazy-loaded images'),
+    fullPageScrollDelay: z.number().int().min(0).max(2000).optional().describe('Delay between scroll steps in ms (default: 400)'),
+    fullPageScrollBy: z.number().int().optional().describe('Pixels to scroll per step (default: viewport height)'),
     fullPageMaxHeight: z.number().int().optional().describe('Maximum pixel height cap for full-page captures'),
     selector: z.string().optional().describe('CSS selector to capture a specific element'),
     clip: z.object({
@@ -186,9 +262,10 @@ server.tool(
       height: z.number(),
     }).optional().describe('Crop region { x, y, width, height } in pixels'),
     // ── Timing ──
-    delay: z.number().int().min(0).max(10000).optional().describe('Milliseconds to wait before capture (default: 0)'),
+    delay: z.number().int().min(0).max(30000).optional().describe('Milliseconds to wait before capture (default: 0)'),
     waitUntil: z.enum(['load', 'domcontentloaded', 'networkidle0', 'networkidle2']).optional().describe('When to consider navigation finished (default: networkidle2)'),
     waitForSelector: z.string().optional().describe('Wait for this CSS selector to appear before capturing'),
+    navigationTimeout: z.number().int().min(0).max(30000).optional().describe('Navigation timeout in ms (default: 25000)'),
     // ── Emulation ──
     darkMode: z.boolean().optional().describe('Emulate dark color scheme (default: false)'),
     reducedMotion: z.boolean().optional().describe('Emulate prefers-reduced-motion to disable animations'),
@@ -201,28 +278,26 @@ server.tool(
     }).optional().describe('Emulate geolocation { latitude, longitude, accuracy? }'),
     userAgent: z.string().optional().describe('Override the browser User-Agent string'),
     // ── Auth & headers ──
-    cookies: z.array(
-      z.union([
-        z.string(),
-        z.object({
-          name: z.string(),
-          value: z.string(),
-          domain: z.string().optional(),
-        }),
-      ])
-    ).optional().describe('Cookies to set — array of "name=value" strings or { name, value, domain? } objects'),
+    cookies: z.array(cookieSchema).optional().describe('Cookies to set — array of "name=value" strings or { name, value, domain? } objects'),
     headers: z.record(z.string(), z.string()).optional().describe('Extra HTTP headers to send with the request'),
     authorization: z.string().optional().describe('Authorization header value (e.g. "Bearer <token>")'),
     bypassCSP: z.boolean().optional().describe('Bypass Content-Security-Policy on the page'),
     // ── Content manipulation ──
     hideSelectors: z.array(z.string()).optional().describe('Array of CSS selectors to hide before capture'),
     click: z.string().optional().describe('CSS selector to click before capturing the screenshot'),
+    injectCss: z.string().optional().describe('Custom CSS to inject before capturing (max 50KB)'),
+    injectJs: z.string().optional().describe('Custom JavaScript to execute before capturing (max 50KB)'),
+    // ── Blocking ──
     blockBanners: z.boolean().optional().describe('Hide cookie consent banners (default: false)'),
     blockAds: z.boolean().optional().describe('Block advertisements on the page'),
     blockChats: z.boolean().optional().describe('Block live chat widgets on the page'),
     blockTrackers: z.boolean().optional().describe('Block tracking scripts on the page'),
-    // ── Extras ──
+    blockRequests: z.array(z.string()).optional().describe('URL patterns to block (array of strings)'),
+    blockResources: z.array(z.string()).optional().describe('Resource types to block (e.g. ["image", "font"])'),
+    // ── Metadata ──
     extractMetadata: z.boolean().optional().describe('Extract page metadata (title, description, OG tags) alongside the screenshot'),
+    // ── Styling ──
+    style: styleSchema,
   },
   async (params) => {
     if (!params.url && !params.html && !params.markdown) {
@@ -237,35 +312,57 @@ server.tool(
     const data = await res.json();
     const format = params.format || 'png';
 
-    return {
-      content: [
-        {
-          type: 'image',
-          data: data.data,
-          mimeType: imageMimeType(format),
-        },
-        {
-          type: 'text',
-          text: `Screenshot captured successfully. Format: ${format}, Size: ${data.size_bytes} bytes, Duration: ${data.duration_ms}ms`,
-        },
-      ],
-    };
+    const content = [
+      {
+        type: 'image',
+        data: data.data,
+        mimeType: imageMimeType(format),
+      },
+      {
+        type: 'text',
+        text: `Screenshot captured successfully. Format: ${format}, Size: ${data.size_bytes} bytes, Duration: ${data.duration_ms}ms`,
+      },
+    ];
+
+    // Include metadata if extracted
+    if (data.metadata) {
+      content.push({
+        type: 'text',
+        text: `Metadata:\n${JSON.stringify(data.metadata, null, 2)}`,
+      });
+    }
+
+    return { content };
   }
 );
 
-// ─── Tool: generate_pdf ─────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// Tool: generate_pdf — COMPLETE coverage
+// ═══════════════════════════════════════════════════════════════════
 server.tool(
   'generate_pdf',
-  'Generate a PDF from a URL or HTML content. Saves the PDF to disk and returns the file path.',
+  'Generate a PDF from a URL or HTML content. Supports custom margins, headers/footers, page ranges, and scaling. Saves the PDF to disk and returns the file path.',
   {
     url: z.string().url().optional().describe('URL to render as PDF (required if no html)'),
     html: z.string().optional().describe('Raw HTML to render as PDF (required if no url)'),
-    format: z.string().optional().describe('Paper format: A4, Letter, Legal, Tabloid (default: A4)'),
+    format: z.string().optional().describe('Paper format: A4, Letter, Legal, Tabloid, A3, A5 (default: A4)'),
     landscape: z.boolean().optional().describe('Landscape orientation (default: false)'),
     printBackground: z.boolean().optional().describe('Include CSS backgrounds (default: true)'),
-    margin: z.string().optional().describe('CSS margin for all sides, e.g. "1cm" or "0.5in"'),
+    margin: z.union([
+      z.string(),
+      z.object({
+        top: z.string().optional(),
+        right: z.string().optional(),
+        bottom: z.string().optional(),
+        left: z.string().optional(),
+      }),
+    ]).optional().describe('CSS margin — string for all sides (e.g. "1cm") or object { top, right, bottom, left }'),
     scale: z.number().min(0.1).max(2).optional().describe('Rendering scale 0.1-2 (default: 1)'),
+    width: z.string().optional().describe('Page width (overrides format) — CSS value like "8.5in"'),
     pageRanges: z.string().optional().describe('Page ranges to include, e.g. "1-5, 8"'),
+    headerTemplate: z.string().optional().describe('HTML template for page header (uses Chromium templating)'),
+    footerTemplate: z.string().optional().describe('HTML template for page footer'),
+    displayHeaderFooter: z.boolean().optional().describe('Show header and footer (default: false)'),
     delay: z.number().int().min(0).max(10000).optional().describe('Milliseconds to wait before rendering (default: 0)'),
     saveTo: z.string().optional().describe('Output file path (default: ./output.pdf)'),
   },
@@ -281,9 +378,8 @@ server.tool(
     });
 
     const data = await res.json();
-    const outputPath = resolve(saveTo || './output.pdf');
+    const outputPath = safePath(saveTo, './output.pdf');
 
-    // Decode base64 and write to disk
     const buffer = Buffer.from(data.data, 'base64');
     writeFileSync(outputPath, buffer);
 
@@ -301,13 +397,15 @@ server.tool(
   }
 );
 
-// ─── Tool: create_og_image ──────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// Tool: create_og_image — COMPLETE coverage
+// ═══════════════════════════════════════════════════════════════════
 server.tool(
   'create_og_image',
   'Generate an Open Graph / social card image. Returns an image using built-in templates or custom HTML.',
   {
     template: z.enum(['default', 'minimal', 'gradient']).optional().describe('Built-in template name (default: "default")'),
-    html: z.string().optional().describe('Custom HTML template (overrides template parameter)'),
+    html: z.string().optional().describe('Custom HTML template (overrides template parameter, Growth plan+)'),
     title: z.string().optional().describe('Main title text (default: "Your Title Here")'),
     subtitle: z.string().optional().describe('Subtitle text'),
     logo: z.string().optional().describe('Logo image URL'),
@@ -344,7 +442,9 @@ server.tool(
   }
 );
 
-// ─── Tool: run_sequence ─────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// Tool: run_sequence — COMPLETE coverage
+// ═══════════════════════════════════════════════════════════════════
 server.tool(
   'run_sequence',
   'Execute a multi-step browser automation sequence. Navigate pages, interact with elements (click, fill, select), and capture multiple screenshots/PDFs in a single browser session. Each output counts as 1 API request.',
@@ -352,7 +452,7 @@ server.tool(
     steps: z.array(
       z.object({
         action: z.enum([
-          'navigate', 'click', 'fill', 'select', 'hover',
+          'navigate', 'click', 'dblclick', 'fill', 'select', 'hover',
           'scroll', 'wait', 'wait_for', 'evaluate',
           'screenshot', 'pdf',
         ]).describe('The action to perform'),
@@ -367,11 +467,16 @@ server.tool(
         name: z.string().optional().describe('Name for the output (for screenshot/pdf actions)'),
         format: z.string().optional().describe('Image format: png, jpeg, webp (screenshot) or A4, Letter (pdf)'),
         fullPage: z.boolean().optional().describe('Capture full scrollable page (for screenshot action)'),
+        fullPageScroll: z.boolean().optional().describe('Auto-scroll for lazy images (for screenshot action)'),
         quality: z.number().int().min(1).max(100).optional().describe('JPEG/WebP quality (for screenshot action)'),
+        selector: z.string().optional().describe('Element selector (for screenshot action)'),
+        omitBackground: z.boolean().optional().describe('Transparent background (for screenshot action)'),
+        delay: z.number().int().min(0).max(10000).optional().describe('Pre-capture delay in ms (for screenshot action)'),
         landscape: z.boolean().optional().describe('Landscape orientation (for pdf action)'),
         printBackground: z.boolean().optional().describe('Include CSS backgrounds (for pdf action)'),
         margin: z.string().optional().describe('CSS margin for all sides (for pdf action)'),
         scale: z.number().min(0.1).max(2).optional().describe('Rendering scale (for pdf action)'),
+        style: styleSchema,
       })
     ).min(1).max(20).describe('Array of steps to execute in order. Must include at least one screenshot or pdf step. Max 20 steps, max 5 outputs.'),
     viewport: z.object({
@@ -380,6 +485,9 @@ server.tool(
     }).optional().describe('Browser viewport size'),
     darkMode: z.boolean().optional().describe('Emulate dark color scheme (default: false)'),
     blockBanners: z.boolean().optional().describe('Hide cookie consent banners (default: false)'),
+    blockAds: z.boolean().optional().describe('Block advertisements on the page'),
+    blockChats: z.boolean().optional().describe('Block live chat widgets'),
+    blockTrackers: z.boolean().optional().describe('Block tracking scripts'),
     deviceScaleFactor: z.number().min(1).max(3).optional().describe('Device pixel ratio (default: 1)'),
   },
   async (params) => {
@@ -430,15 +538,17 @@ server.tool(
   }
 );
 
-// ─── Tool: record_video ─────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// Tool: record_video — COMPLETE coverage
+// ═══════════════════════════════════════════════════════════════════
 server.tool(
   'record_video',
-  'Record a professional demo video of a multi-step browser automation sequence. Produces MP4/WebM/GIF with automatic cursor highlighting, click ripple effects, smooth cursor movement, and auto-zoom on clicks (Cursorful-style). Each video costs 3 API requests. Saves to disk and returns the file path.',
+  'Record a professional demo video of a multi-step browser automation sequence. Produces MP4/WebM/GIF with cursor highlighting, click effects, smooth movement, per-step zoom, step notes, browser frame (macOS/Windows), gradient/glass backgrounds, and more. Costs 3 API requests. Saves to disk.',
   {
     steps: z.array(
       z.object({
         action: z.enum([
-          'navigate', 'click', 'fill', 'select', 'hover',
+          'navigate', 'click', 'dblclick', 'fill', 'select', 'hover',
           'scroll', 'wait', 'wait_for', 'evaluate',
         ]).describe('The action to perform (no screenshot/pdf — the whole sequence is recorded as video)'),
         url: z.string().url().optional().describe('URL to navigate to (for navigate action)'),
@@ -449,6 +559,12 @@ server.tool(
         x: z.number().optional().describe('Horizontal scroll position'),
         y: z.number().optional().describe('Vertical scroll position'),
         script: z.string().max(5000).optional().describe('JavaScript to execute in page context (for evaluate action)'),
+        note: z.string().max(200).optional().describe('Tooltip annotation text shown during this step (max 200 chars)'),
+        live: z.boolean().optional().describe('For wait steps: true captures animated content in real-time, false freezes a single frame (default: false)'),
+        zoom: z.object({
+          enabled: z.boolean().optional().describe('Enable zoom on this step (default: false)'),
+          level: z.number().min(1.2).max(4).optional().describe('Zoom magnification (inherits from global zoom.level if not set)'),
+        }).optional().describe('Per-step zoom override (for click/dblclick steps). Overrides global zoom settings.'),
       })
     ).min(1).max(50).describe('Array of steps to execute and record. Max steps depends on plan (10-50).'),
     viewport: z.object({
@@ -457,31 +573,63 @@ server.tool(
     }).optional().describe('Browser viewport size'),
     format: z.enum(['mp4', 'webm', 'gif']).optional().describe('Video format (default: mp4). webm/gif require Starter+ plan.'),
     framerate: z.number().int().optional().describe('Frames per second: 24, 30, or 60 (default: 30)'),
+    // ── Cursor ──
     cursor: z.object({
       visible: z.boolean().optional().describe('Show cursor overlay (default: true)'),
-      style: z.enum(['highlight', 'circle', 'spotlight', 'dot']).optional().describe('Cursor style (default: highlight)'),
+      style: z.enum(['highlight', 'circle', 'spotlight', 'dot', 'classic']).optional().describe('Cursor style (default: highlight). classic = natural arrow cursor.'),
       color: z.string().optional().describe('Cursor color as hex, e.g. "#3B82F6" (default: blue)'),
       size: z.number().int().min(8).max(60).optional().describe('Cursor size in pixels (default: 20)'),
       smoothing: z.boolean().optional().describe('Smooth animated cursor movement (default: true)'),
+      opacity: z.number().min(0.1).max(1.0).optional().describe('Cursor opacity 0.1-1.0 (default: 1.0)'),
+      persist: z.boolean().optional().describe('Keep cursor visible between actions, not just during them (default: false)'),
     }).optional().describe('Cursor appearance settings'),
+    // ── Zoom (global defaults, per-step overrides available) ──
     zoom: z.object({
-      enabled: z.boolean().optional().describe('Auto-zoom on clicks (default: true)'),
-      level: z.number().min(1.5).max(4).optional().describe('Zoom magnification (default: 2.0)'),
-      duration: z.number().int().min(200).max(2000).optional().describe('Zoom animation duration in ms (default: 600)'),
-    }).optional().describe('Auto-zoom settings for click actions'),
+      enabled: z.boolean().optional().describe('Enable auto-zoom on clicks (default: false — use per-step zoom instead)'),
+      level: z.number().min(1.2).max(4).optional().describe('Default zoom magnification (default: 1.5)'),
+      duration: z.number().int().min(400).max(3000).optional().describe('Zoom animation duration in ms (default: 1200)'),
+      easing: z.enum(['ease-in-out', 'linear', 'ease']).optional().describe('Zoom animation easing (default: ease-in-out)'),
+    }).optional().describe('Global zoom settings. Per-step zoom on click/dblclick steps overrides these.'),
     autoZoom: z.boolean().optional().describe('Shorthand: set to true to enable auto-zoom with defaults (same as zoom.enabled=true)'),
+    // ── Click effects ──
     clickEffect: z.object({
       enabled: z.boolean().optional().describe('Show click ripple effects (default: true)'),
       style: z.enum(['ripple', 'pulse', 'ring']).optional().describe('Click effect style (default: ripple)'),
       color: z.string().optional().describe('Click effect color as hex'),
     }).optional().describe('Visual click effect settings'),
+    // ── Pace ──
     pace: z.union([
       z.number().min(0.25).max(6),
       z.enum(['fast', 'normal', 'slow', 'dramatic', 'cinematic']),
     ]).optional().describe('Controls how deliberate the video feels. Number (0.25–6.0, higher = slower) or preset: "fast" (0.5×), "normal" (1×), "slow" (2×), "dramatic" (3×), "cinematic" (4.5×). Default: "normal".'),
+    // ── Frame (browser chrome) ──
+    frame: z.object({
+      enabled: z.boolean().optional().describe('Enable browser frame around the video (default: false)'),
+      style: z.enum(['macos', 'windows', 'minimal']).optional().describe('Frame style: macos (traffic lights), windows (min/max/close), minimal (dots only). Default: macos.'),
+      theme: z.enum(['light', 'dark', 'auto']).optional().describe('Frame color theme (default: auto)'),
+      showUrl: z.boolean().optional().describe('Show URL in the frame bar (default: true)'),
+    }).optional().describe('Browser chrome frame around the video. Adds a macOS/Windows-style title bar.'),
+    // ── Background ──
+    background: z.object({
+      enabled: z.boolean().optional().describe('Enable styled background (default: false)'),
+      type: z.enum(['solid', 'gradient']).optional().describe('Background type (default: gradient)'),
+      gradient: z.enum([
+        'ocean', 'sunset', 'forest', 'midnight', 'aurora',
+        'lavender', 'peach', 'arctic', 'ember', 'slate', 'neon', 'custom',
+      ]).optional().describe('Gradient preset name. 12 built-in presets, or "custom" to use colors array. Default: ocean.'),
+      color: z.string().optional().describe('Solid background color as hex (e.g. "#1e3a5f"). Used when type is "solid" or gradient is "custom".'),
+      colors: z.array(z.string()).optional().describe('Array of 2 hex colors for custom gradient (e.g. ["#1e3a5f", "#7c3aed"]). Only used when gradient is "custom".'),
+      padding: z.number().int().min(0).max(120).optional().describe('Padding around the video in pixels (default: 40)'),
+      borderRadius: z.number().int().min(0).max(40).optional().describe('Corner radius in pixels (default: 12)'),
+    }).optional().describe('Styled background behind the video. Adds gradient/solid background with padding and rounded corners — creates a "floating window" effect.'),
+    // ── Blocking ──
     darkMode: z.boolean().optional().describe('Emulate dark color scheme (default: false)'),
-    blockBanners: z.boolean().optional().describe('Hide cookie consent banners (default: true)'),
+    blockBanners: z.boolean().optional().describe('Hide cookie consent banners (default: true for videos)'),
+    blockAds: z.boolean().optional().describe('Block advertisements on the page'),
+    blockChats: z.boolean().optional().describe('Block live chat widgets'),
+    blockTrackers: z.boolean().optional().describe('Block tracking scripts'),
     deviceScaleFactor: z.number().min(1).max(3).optional().describe('Device pixel ratio (default: 1)'),
+    variables: z.record(z.string()).optional().describe('Key-value map for variable substitution in step URLs/values. E.g. { "base_url": "https://example.com" } replaces {{base_url}} in steps.'),
     saveTo: z.string().optional().describe('Output file path (default: ./recording.mp4)'),
   },
   async (params) => {
@@ -500,9 +648,8 @@ server.tool(
       const data = await res.json();
       const format = params.format || 'mp4';
       const ext = format === 'gif' ? 'gif' : format;
-      const outputPath = resolve(saveTo || `./recording.${ext}`);
+      const outputPath = safePath(saveTo, `./recording.${ext}`);
 
-      // Decode base64 and write to disk
       const buffer = Buffer.from(data.data, 'base64');
       writeFileSync(outputPath, buffer);
 
@@ -530,10 +677,12 @@ server.tool(
   }
 );
 
-// ─── Tool: inspect_page ─────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// Tool: inspect_page — COMPLETE coverage
+// ═══════════════════════════════════════════════════════════════════
 server.tool(
   'inspect_page',
-  'Inspect a web page and get a structured map of all interactive elements, headings, forms, links, and images — each with a unique CSS selector. Use this BEFORE run_sequence to discover what elements exist on the page and get reliable selectors. Returns text (not an image), so it is fast and cheap. Costs 1 API request.',
+  'Inspect a web page and get a structured map of all interactive elements, headings, forms, links, and images — each with a unique CSS selector. Use this BEFORE run_sequence or record_video to discover what elements exist on the page and get reliable selectors. Returns text (not an image), so it is fast and cheap. Costs 1 API request.',
   {
     // ── Source ──
     url: z.string().url().optional().describe('URL to inspect (required if no html)'),
@@ -544,36 +693,39 @@ server.tool(
     viewportDevice: z.string().optional().describe('Device preset for viewport emulation (e.g. "iphone_14_pro"). Use list_devices to see all presets.'),
     viewportMobile: z.boolean().optional().describe('Enable mobile meta viewport emulation'),
     viewportHasTouch: z.boolean().optional().describe('Enable touch event emulation'),
+    viewportLandscape: z.boolean().optional().describe('Landscape orientation'),
     deviceScaleFactor: z.number().min(1).max(3).optional().describe('Device pixel ratio (default: 1)'),
     // ── Timing ──
     waitUntil: z.enum(['load', 'domcontentloaded', 'networkidle0', 'networkidle2']).optional().describe('When to consider navigation finished (default: networkidle2)'),
     waitForSelector: z.string().optional().describe('Wait for this CSS selector to appear before inspecting'),
+    navigationTimeout: z.number().int().min(0).max(30000).optional().describe('Navigation timeout in ms (default: 25000)'),
     // ── Emulation ──
     darkMode: z.boolean().optional().describe('Emulate dark color scheme (default: false)'),
     reducedMotion: z.boolean().optional().describe('Emulate prefers-reduced-motion'),
+    mediaType: z.enum(['screen', 'print']).optional().describe('Emulate CSS media type'),
+    timeZone: z.string().optional().describe('Override browser timezone'),
+    geolocation: z.object({
+      latitude: z.number(),
+      longitude: z.number(),
+      accuracy: z.number().optional(),
+    }).optional().describe('Emulate geolocation'),
     userAgent: z.string().optional().describe('Override the browser User-Agent string'),
     // ── Auth & headers ──
-    cookies: z.array(
-      z.union([
-        z.string(),
-        z.object({
-          name: z.string(),
-          value: z.string(),
-          domain: z.string().optional(),
-        }),
-      ])
-    ).optional().describe('Cookies to set — array of "name=value" strings or { name, value, domain? } objects'),
+    cookies: z.array(cookieSchema).optional().describe('Cookies to set — array of "name=value" strings or { name, value, domain? } objects'),
     headers: z.record(z.string(), z.string()).optional().describe('Extra HTTP headers to send with the request'),
     authorization: z.string().optional().describe('Authorization header value (e.g. "Bearer <token>")'),
     bypassCSP: z.boolean().optional().describe('Bypass Content-Security-Policy on the page'),
     // ── Content manipulation ──
     hideSelectors: z.array(z.string()).optional().describe('Array of CSS selectors to hide before inspecting'),
+    injectCss: z.string().optional().describe('Custom CSS to inject before inspecting'),
+    injectJs: z.string().optional().describe('Custom JavaScript to execute before inspecting'),
+    // ── Blocking ──
     blockBanners: z.boolean().optional().describe('Hide cookie consent banners (default: false)'),
     blockAds: z.boolean().optional().describe('Block advertisements on the page'),
     blockChats: z.boolean().optional().describe('Block live chat widgets'),
     blockTrackers: z.boolean().optional().describe('Block tracking scripts'),
-    injectCss: z.string().optional().describe('Custom CSS to inject before inspecting'),
-    injectJs: z.string().optional().describe('Custom JavaScript to execute before inspecting'),
+    blockRequests: z.array(z.string()).optional().describe('URL patterns to block'),
+    blockResources: z.array(z.string()).optional().describe('Resource types to block'),
   },
   async (params) => {
     if (!params.url && !params.html) {
@@ -591,7 +743,6 @@ server.tool(
       // Format as structured text for efficient LLM consumption
       const lines = [];
 
-      // Header
       lines.push(`Page: ${data.title || '(untitled)'} (${data.url || params.url || 'html content'})`);
       if (data.metadata) {
         if (data.metadata.description) lines.push(`Description: ${data.metadata.description}`);
@@ -600,7 +751,6 @@ server.tool(
       }
       lines.push('');
 
-      // Headings
       if (data.headings && data.headings.length > 0) {
         lines.push(`Headings (${data.headings.length}):`);
         for (const h of data.headings) {
@@ -609,7 +759,6 @@ server.tool(
         lines.push('');
       }
 
-      // Interactive elements
       if (data.elements && data.elements.length > 0) {
         lines.push(`Interactive Elements (${data.elements.length}):`);
         for (const el of data.elements) {
@@ -625,7 +774,6 @@ server.tool(
         lines.push('');
       }
 
-      // Forms
       if (data.forms && data.forms.length > 0) {
         lines.push(`Forms (${data.forms.length}):`);
         for (const f of data.forms) {
@@ -639,7 +787,6 @@ server.tool(
         lines.push('');
       }
 
-      // Links
       if (data.links && data.links.length > 0) {
         lines.push(`Links (${data.links.length}):`);
         for (const l of data.links) {
@@ -648,7 +795,6 @@ server.tool(
         lines.push('');
       }
 
-      // Images
       if (data.images && data.images.length > 0) {
         lines.push(`Images (${data.images.length}):`);
         for (const img of data.images) {
@@ -661,12 +807,7 @@ server.tool(
       lines.push(`Duration: ${data.duration_ms}ms`);
 
       return {
-        content: [
-          {
-            type: 'text',
-            text: lines.join('\n'),
-          },
-        ],
+        content: [{ type: 'text', text: lines.join('\n') }],
       };
     } catch (err) {
       return { content: [{ type: 'text', text: `Inspect error: ${err.message}` }], isError: true };
@@ -674,7 +815,9 @@ server.tool(
   }
 );
 
-// ─── Tool: list_devices ─────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// Tool: list_devices
+// ═══════════════════════════════════════════════════════════════════
 server.tool(
   'list_devices',
   'List all available device presets for viewport emulation (e.g. iphone_14_pro, macbook_pro_14). Use the returned device names with the viewportDevice parameter in take_screenshot.',
@@ -703,7 +846,9 @@ server.tool(
   }
 );
 
-// ─── Tool: check_usage ──────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════
+// Tool: check_usage
+// ═══════════════════════════════════════════════════════════════════
 server.tool(
   'check_usage',
   'Check your current PageBolt API usage and plan limits.',
@@ -736,7 +881,6 @@ server.tool(
 // ─── Prompts ────────────────────────────────────────────────────
 function registerPrompts(server) {
 
-  // ── Prompt: capture-page ──────────────────────────────────────
   server.prompt(
     'capture-page',
     'Capture a clean screenshot of any URL with sensible defaults. Optionally inspects the page first.',
@@ -745,11 +889,20 @@ function registerPrompts(server) {
       device: z.string().optional().describe('Device preset, e.g. "iphone_14_pro" or "macbook_pro_14"'),
       dark_mode: z.enum(['true', 'false']).optional().describe('Enable dark mode (default: false)'),
       full_page: z.enum(['true', 'false']).optional().describe('Capture the full scrollable page (default: false)'),
+      style_theme: z.enum([
+        'notion', 'paper', 'vercel', 'glass', 'ocean', 'sunset',
+        'linear', 'arc', 'glassDark', 'glassWarm', 'spotlight',
+        'neonBlue', 'neonPurple', 'neonGreen', 'lavender', 'ember', 'dots', 'grid',
+        'none',
+      ]).optional().describe('Screenshot style theme (default: none). Use "glass" for frosted glass, "ocean" for gradient, "linear" for Linear-style dark.'),
     },
     (args) => {
       const device = args.device ? `\n- Use device preset: ${args.device}` : '';
       const dark = args.dark_mode === 'true' ? '\n- Enable dark mode' : '';
       const full = args.full_page === 'true' ? '\n- Capture the full scrollable page' : '';
+      const style = args.style_theme && args.style_theme !== 'none'
+        ? `\n- Apply style theme: "${args.style_theme}" (adds frame, background, shadow)`
+        : '';
 
       return {
         messages: [
@@ -758,16 +911,15 @@ function registerPrompts(server) {
             content: {
               type: 'text',
               text: `Take a clean screenshot of ${args.url} with these settings:
-- Block banners, ads, chats, and trackers for a clean capture${device}${dark}${full}
+- Block banners, ads, chats, and trackers for a clean capture${device}${dark}${full}${style}
 - Use PNG format
-- If the page looks complex or you need to verify elements, run inspect_page first
 
 Call take_screenshot with:
   url: "${args.url}"
   blockBanners: true
   blockAds: true
   blockChats: true
-  blockTrackers: true${args.device ? `\n  viewportDevice: "${args.device}"` : ''}${args.dark_mode === 'true' ? '\n  darkMode: true' : ''}${args.full_page === 'true' ? '\n  fullPage: true\n  fullPageScroll: true' : ''}`,
+  blockTrackers: true${args.device ? `\n  viewportDevice: "${args.device}"` : ''}${args.dark_mode === 'true' ? '\n  darkMode: true' : ''}${args.full_page === 'true' ? '\n  fullPage: true\n  fullPageScroll: true' : ''}${args.style_theme && args.style_theme !== 'none' ? `\n  style: { theme: "${args.style_theme}" }` : ''}`,
             },
           },
         ],
@@ -775,7 +927,6 @@ Call take_screenshot with:
     }
   );
 
-  // ── Prompt: record-demo ───────────────────────────────────────
   server.prompt(
     'record-demo',
     'Record a professional demo video of a web page or flow. Generates a step sequence automatically.',
@@ -784,10 +935,21 @@ Call take_screenshot with:
       description: z.string().describe('What the demo should show, e.g. "Sign in and explore the dashboard"'),
       pace: z.enum(['fast', 'normal', 'slow', 'dramatic', 'cinematic']).optional().describe('Video pace preset (default: normal)'),
       format: z.enum(['mp4', 'webm', 'gif']).optional().describe('Output format (default: mp4)'),
+      frame: z.enum(['macos', 'windows', 'minimal', 'none']).optional().describe('Browser frame style (default: none)'),
+      background: z.enum(['ocean', 'sunset', 'midnight', 'glass', 'none']).optional().describe('Background style (default: none)'),
     },
     (args) => {
       const pace = args.pace || 'normal';
       const format = args.format || 'mp4';
+      const frame = args.frame || 'none';
+      const bg = args.background || 'none';
+
+      const frameConfig = frame !== 'none'
+        ? `\n   - frame: { enabled: true, style: "${frame}", theme: "dark" }`
+        : '';
+      const bgConfig = bg !== 'none'
+        ? `\n   - background: { enabled: true, type: "gradient", gradient: "${bg}", padding: 40, borderRadius: 12 }`
+        : '';
 
       return {
         messages: [
@@ -813,13 +975,19 @@ Please follow this workflow:
    - format: "${format}"
    - pace: "${pace}"
    - blockBanners: true
-   - cursor: { style: "spotlight", color: "#6366f1" }
-   - clickEffect: { style: "ripple", color: "#6366f1" }
+   - cursor: { style: "classic", visible: true, persist: true }
+   - clickEffect: { style: "ripple" }${frameConfig}${bgConfig}
 
 Important tips:
 - Use selectors from the inspect_page results — never guess selectors
-- Add scroll actions between sections to show content naturally
+- Add wait steps (ms: 800-1200) between interactions for visual clarity
 - Use wait_for after navigation to ensure the page loads
+- **ALWAYS add a "note" field on every meaningful step** — notes render as styled tooltip annotations that explain what's happening, creating a guided tour experience. Examples:
+  - navigate: note: "Opening the dashboard"
+  - click: note: "This button creates a new project"
+  - fill: note: "Enter your email to get started"
+  - hover: note: "Hover to reveal the dropdown menu"
+  - The ONLY steps without notes should be wait/wait_for (pauses)
 - Keep to 15 steps or fewer for best results
 - Each video costs 3 API requests`,
             },
@@ -829,7 +997,6 @@ Important tips:
     }
   );
 
-  // ── Prompt: audit-page ────────────────────────────────────────
   server.prompt(
     'audit-page',
     'Inspect a page and return a structured analysis of its elements, forms, links, and interactive components.',
@@ -872,14 +1039,11 @@ Important tips:
 // ─── Resources ──────────────────────────────────────────────────
 function registerResources(server) {
 
-  // ── Resource: pagebolt://api-docs ─────────────────────────────
   server.resource(
     'api-docs',
     'pagebolt://api-docs',
     { description: 'Complete PageBolt API reference with all endpoints, parameters, examples, and plan limits. Read this for detailed documentation beyond tool descriptions.', mimeType: 'text/plain' },
     async () => {
-      // Serve a comprehensive API reference. In production this is baked in;
-      // we could also fetch /llms-full.txt but embedding avoids a network call.
       try {
         const res = await fetch(`${BASE_URL}/llms-full.txt`);
         if (res.ok) {
@@ -901,7 +1065,7 @@ function registerResources(server) {
 
 } // end registerResources
 
-// ─── Smithery sandbox export (for scanning tools without credentials) ─
+// ─── Smithery sandbox export ─────────────────────────────────────
 export function createSandboxServer() {
   return createConfiguredServer();
 }
