@@ -170,6 +170,8 @@ record_video supports polished video output:
 - cursor: { style: "classic", persist: true } — always-visible cursor
 - Per-step zoom: add zoom: { enabled: true } on click steps
 - **Step notes (IMPORTANT)**: Add a "note" field to EVERY action step for guided-tour-style tooltip annotations. Notes appear as beautiful styled tooltips near the element being interacted with. Example: { action: "click", selector: "#btn", note: "Click here to open settings" }. The only steps that should NOT have notes are wait/wait_for pauses.
+- **Audio Guide**: Add audioGuide: { enabled: true, script: "Welcome. {{1}} Click here. {{2}} Done." } for AI voice narration. Two modes: (1) Per-step — add "narration" text to individual steps. (2) Script — provide a single "script" with {{N}} markers for continuous narration synchronized to steps.
+- Audio Guide voices: ava, andrew, emma, brian, aria, guy, jenny, davis, christopher, michelle (Azure) or alloy, echo, fable, nova, onyx, shimmer (OpenAI).
 - **Live wait steps**: Add live: true to wait steps to capture animated content (transitions, loading spinners) instead of freezing the last frame.
 - **Variables**: Pass variables: { "base_url": "https://example.com" } and use {{base_url}} in step URLs/values for reusable recordings.
 
@@ -580,6 +582,7 @@ server.tool(
         y: z.number().optional().describe('Vertical scroll position'),
         script: z.string().max(5000).optional().describe('JavaScript to execute in page context (for evaluate action)'),
         note: z.string().max(200).optional().describe('Tooltip annotation text shown during this step (max 200 chars)'),
+        narration: z.string().max(500).optional().describe('Text to speak at this step (max 500 chars, requires audioGuide.enabled). Used in per-step mode.'),
         live: z.boolean().optional().describe('For wait steps: true captures animated content in real-time, false freezes a single frame (default: false)'),
         zoom: z.object({
           enabled: z.boolean().optional().describe('Enable zoom on this step (default: false)'),
@@ -649,6 +652,19 @@ server.tool(
     blockChats: z.boolean().optional().describe('Block live chat widgets'),
     blockTrackers: z.boolean().optional().describe('Block tracking scripts'),
     deviceScaleFactor: z.number().min(1).max(3).optional().describe('Device pixel ratio (default: 1)'),
+    // ── Audio Guide ──
+    audioGuide: z.object({
+      enabled: z.boolean().optional().describe('Enable Audio Guide narration'),
+      provider: z.enum(['azure', 'openai']).optional().describe('TTS provider (default: azure)'),
+      voice: z.string().optional().describe('Voice preset: ava, andrew, emma, brian, aria, guy, jenny, davis, christopher, michelle (azure) or alloy, echo, fable, nova, onyx, shimmer (openai)'),
+      speed: z.number().min(0.5).max(2.0).optional().describe('Speech rate (default: 1.0)'),
+      pitch: z.string().optional().describe('Voice pitch: default, x-low, low, medium, high, x-high (Azure only)'),
+      volume: z.string().optional().describe('Audio volume: default, silent, x-soft, soft, medium, loud, x-loud (Azure only)'),
+      style: z.string().optional().describe('Speaking style: narration-professional, cheerful, excited, friendly, etc. (Azure only)'),
+      styleDegree: z.number().min(0.01).max(2.0).optional().describe('Style intensity 0.01-2.0 (Azure only)'),
+      model: z.enum(['tts-1', 'tts-1-hd']).optional().describe('OpenAI model (OpenAI only, default: tts-1)'),
+      script: z.string().max(5000).optional().describe('Script mode: a single narration script with {{N}} step markers (0-indexed) for synchronized narration. Steps execute when narration reaches each marker. When provided, per-step "narration" fields are ignored.'),
+    }).optional().describe('Audio Guide TTS settings. Two modes: (1) Per-step — add "narration" to individual steps. (2) Script — provide "script" with {{N}} markers for continuous narration synchronized to steps.'),
     variables: z.record(z.string()).optional().describe('Key-value map for variable substitution in step URLs/values. E.g. { "base_url": "https://example.com" } replaces {{base_url}} in steps.'),
     saveTo: z.string().optional().describe('Output file path (default: ./recording.mp4)'),
   },
