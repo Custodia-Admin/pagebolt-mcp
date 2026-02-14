@@ -8,7 +8,7 @@ Take screenshots, generate PDFs, create OG images, inspect pages, and record dem
 
 **Works with Claude Desktop, Cursor, Windsurf, Cline, and any MCP-compatible client.**
 
-![mobile-demo-gif-new](https://github.com/user-attachments/assets/fc1c612e-f756-4dc2-a9fe-2b3746228fa7)
+<img width="1280" height="1279" alt="pagebolt-screenshot_1" src="https://github.com/user-attachments/assets/fd21a372-df4d-41cd-baf4-5b6dd6a9a685" />
 
 ---
 
