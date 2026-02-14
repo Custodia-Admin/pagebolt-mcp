@@ -8,6 +8,8 @@ Take screenshots, generate PDFs, create OG images, inspect pages, and record dem
 
 **Works with Claude Desktop, Cursor, Windsurf, Cline, and any MCP-compatible client.**
 
+![mobile-demo-gif-new](https://github.com/user-attachments/assets/fc1c612e-f756-4dc2-a9fe-2b3746228fa7)
+
 ---
 
 ## What It Does
