@@ -168,12 +168,16 @@ record_video supports polished video output:
 - frame: { enabled: true, style: "macos" } — browser chrome around the video
 - background: { enabled: true, type: "gradient", gradient: "ocean" } — gradient/glass background with padding
 - cursor: { style: "classic", persist: true } — always-visible cursor
-- Per-step zoom: add zoom: { enabled: true } on click steps
 - **Step notes (IMPORTANT)**: Add a "note" field to EVERY action step for guided-tour-style tooltip annotations. Notes appear as beautiful styled tooltips near the element being interacted with. Example: { action: "click", selector: "#btn", note: "Click here to open settings" }. The only steps that should NOT have notes are wait/wait_for pauses.
 - **Audio Guide**: Add audioGuide: { enabled: true, script: "Welcome. {{1}} Click here. {{2}} Done." } for AI voice narration. Two modes: (1) Per-step — add "narration" text to individual steps. (2) Script — provide a single "script" with {{N}} markers for continuous narration synchronized to steps.
 - Audio Guide voices: ava, andrew, emma, brian, aria, guy, jenny, davis, christopher, michelle (Azure) or alloy, echo, fable, nova, onyx, shimmer (OpenAI).
-- **Live wait steps**: Add live: true to wait steps to capture animated content (transitions, loading spinners) instead of freezing the last frame.
 - **Variables**: Pass variables: { "base_url": "https://example.com" } and use {{base_url}} in step URLs/values for reusable recordings.
+
+## IMPORTANT: Video Step Best Practices
+
+- **Do NOT add wait steps between every action.** The "pace" parameter already adds natural pauses between steps. Only use wait when: (1) the page needs time to load after navigation, or (2) you want to hold on a view for narration. A typical video should have very few wait steps.
+- **Do NOT use zoom unless the user explicitly asks for it.** Zoom adds visual complexity and encoding time. Omit zoom entirely by default.
+- **Keep videos concise.** A good demo has 5-15 action steps (navigate, click, fill, hover, scroll). More steps = longer encoding time and larger files.
 
 ## Common Parameters (available on most tools)
 
@@ -565,7 +569,7 @@ server.tool(
 // ═══════════════════════════════════════════════════════════════════
 server.tool(
   'record_video',
-  'Record a professional demo video of a multi-step browser automation sequence. Produces MP4/WebM/GIF with cursor highlighting, click effects, smooth movement, per-step zoom, step notes, browser frame (macOS/Windows), gradient/glass backgrounds, and more. Costs 3 API requests. Saves to disk.',
+  'Record a professional demo video of a multi-step browser automation sequence. Produces MP4/WebM/GIF with cursor highlighting, click effects, smooth movement, step notes, browser frame (macOS/Windows), gradient/glass backgrounds, and more. Costs 3 API requests. Saves to disk. BEST PRACTICE: Keep videos concise (5-15 action steps). Do NOT add wait steps between every action — the pace parameter handles timing. Only use wait for page loads or narration holds. Do NOT use zoom unless the user explicitly asks for it.',
   {
     steps: z.array(
       z.object({
@@ -576,7 +580,7 @@ server.tool(
         url: z.string().url().optional().describe('URL to navigate to (for navigate action)'),
         selector: z.string().optional().describe('CSS selector for the target element'),
         value: z.string().optional().describe('Value to type or select'),
-        ms: z.number().int().min(0).max(10000).optional().describe('Milliseconds to wait (for wait action)'),
+        ms: z.number().int().min(0).max(10000).optional().describe('Milliseconds to wait (for wait action). Only use wait steps when the page needs loading time or to hold for narration — the pace parameter handles inter-step timing automatically.'),
         timeout: z.number().int().min(0).max(15000).optional().describe('Timeout in ms for wait_for (default: 10000)'),
         x: z.number().optional().describe('Horizontal scroll position'),
         y: z.number().optional().describe('Vertical scroll position'),
@@ -585,11 +589,11 @@ server.tool(
         narration: z.string().max(500).optional().describe('Text to speak at this step (max 500 chars, requires audioGuide.enabled). Used in per-step mode.'),
         live: z.boolean().optional().describe('For wait steps: true captures animated content in real-time, false freezes a single frame (default: false)'),
         zoom: z.object({
-          enabled: z.boolean().optional().describe('Enable zoom on this step (default: false)'),
+          enabled: z.boolean().optional().describe('Enable zoom on this step (default: false). Only use when user explicitly requests zoom.'),
           level: z.number().min(1.2).max(4).optional().describe('Zoom magnification (inherits from global zoom.level if not set)'),
-        }).optional().describe('Per-step zoom override (for click/dblclick steps). Overrides global zoom settings.'),
+        }).optional().describe('Per-step zoom override. Do NOT add zoom unless the user specifically requests it — it adds encoding time and visual complexity.'),
       })
-    ).min(1).max(50).describe('Array of steps to execute and record. Max steps depends on plan (10-50).'),
+    ).min(1).max(50).describe('Array of action steps to record. Keep concise: 5-15 steps is ideal. Do NOT pad with wait steps — pace handles timing.'),
     viewport: z.object({
       width: z.number().int().min(320).max(3840).optional().describe('Viewport width (default: 1280)'),
       height: z.number().int().min(200).max(2160).optional().describe('Viewport height (default: 720)'),
@@ -612,8 +616,8 @@ server.tool(
       level: z.number().min(1.2).max(4).optional().describe('Default zoom magnification (default: 1.5)'),
       duration: z.number().int().min(400).max(3000).optional().describe('Zoom animation duration in ms (default: 1200)'),
       easing: z.enum(['ease-in-out', 'linear', 'ease']).optional().describe('Zoom animation easing (default: ease-in-out)'),
-    }).optional().describe('Global zoom settings. Per-step zoom on click/dblclick steps overrides these.'),
-    autoZoom: z.boolean().optional().describe('Shorthand: set to true to enable auto-zoom with defaults (same as zoom.enabled=true)'),
+    }).optional().describe('Global zoom settings. Only use when the user explicitly requests zoom. Do NOT enable by default.'),
+    autoZoom: z.boolean().optional().describe('Enable auto-zoom on all clicks (default: false). Only use when user explicitly requests zoom.'),
     // ── Click effects ──
     clickEffect: z.object({
       enabled: z.boolean().optional().describe('Show click ripple effects (default: true)'),
@@ -1039,15 +1043,15 @@ Please follow this workflow:
 
 Important tips:
 - Use selectors from the inspect_page results — never guess selectors
-- Add wait steps (ms: 800-1200) between interactions for visual clarity
-- Use wait_for after navigation to ensure the page loads
+- Do NOT add wait steps between every action — the pace parameter already handles timing between steps. Only use wait when: (1) the page needs time to load new content after navigation, or (2) you need to hold on a view for narration.
+- Do NOT use zoom unless I specifically ask for it
 - **ALWAYS add a "note" field on every meaningful step** — notes render as styled tooltip annotations that explain what's happening, creating a guided tour experience. Examples:
   - navigate: note: "Opening the dashboard"
   - click: note: "This button creates a new project"
   - fill: note: "Enter your email to get started"
   - hover: note: "Hover to reveal the dropdown menu"
   - The ONLY steps without notes should be wait/wait_for (pauses)
-- Keep to 15 steps or fewer for best results
+- Keep to 5-15 action steps for best results. Fewer steps = faster encoding and smaller files.
 - Each video costs 3 API requests`,
             },
           },
