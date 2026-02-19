@@ -57,7 +57,7 @@ async function callApi(endpoint, options = {}) {
   const method = options.method || 'GET';
   const headers = {
     'x-api-key': API_KEY,
-    'user-agent': 'pagebolt-mcp/1.5.2',
+    'user-agent': 'pagebolt-mcp/1.6.2',
     ...(options.body ? { 'Content-Type': 'application/json' } : {}),
   };
 
@@ -217,7 +217,7 @@ Use blockBanners on almost every request to get clean captures. Combine blockAds
 function createConfiguredServer() {
   const srv = new McpServer({
     name: 'pagebolt',
-    version: '1.5.0',
+    version: '1.6.2',
   }, {
     instructions: SERVER_INSTRUCTIONS,
   });
@@ -483,7 +483,7 @@ server.tool(
           'screenshot', 'pdf',
         ]).describe('The action to perform'),
         url: z.string().url().optional().describe('URL to navigate to (for navigate action)'),
-        selector: z.string().optional().describe('CSS selector for the target element'),
+        selector: z.string().optional().describe('CSS selector for the target element (also used for element screenshots)'),
         value: z.string().optional().describe('Value to type or select'),
         ms: z.number().int().min(0).max(10000).optional().describe('Milliseconds to wait (for wait action)'),
         timeout: z.number().int().min(0).max(15000).optional().describe('Timeout in ms for wait_for (default: 10000)'),
@@ -495,7 +495,6 @@ server.tool(
         fullPage: z.boolean().optional().describe('Capture full scrollable page (for screenshot action)'),
         fullPageScroll: z.boolean().optional().describe('Auto-scroll for lazy images (for screenshot action)'),
         quality: z.number().int().min(1).max(100).optional().describe('JPEG/WebP quality (for screenshot action)'),
-        selector: z.string().optional().describe('Element selector (for screenshot action)'),
         omitBackground: z.boolean().optional().describe('Transparent background (for screenshot action)'),
         delay: z.number().int().min(0).max(10000).optional().describe('Pre-capture delay in ms (for screenshot action)'),
         landscape: z.boolean().optional().describe('Landscape orientation (for pdf action)'),
