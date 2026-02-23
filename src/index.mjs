@@ -57,7 +57,7 @@ async function callApi(endpoint, options = {}) {
   const method = options.method || 'GET';
   const headers = {
     'x-api-key': API_KEY,
-    'user-agent': 'pagebolt-mcp/1.6.2',
+    'user-agent': 'pagebolt-mcp/1.7.0',
     ...(options.body ? { 'Content-Type': 'application/json' } : {}),
   };
 
@@ -146,6 +146,8 @@ PageBolt gives you 8 tools for web capture and browser automation. All tools use
 | inspect_page | Get structured map of page elements with CSS selectors | 1 request |
 | list_devices | List 25+ device presets (iPhone, iPad, MacBook, etc.) | 0 (free) |
 | check_usage | Check current API usage and plan limits | 0 (free) |
+| create_session | Create a persistent browser session (Starter+ only) | 0 (free to create) |
+| destroy_session | Destroy a persistent browser session | 0 (free) |
 
 ## Key Workflow: Inspect Before You Interact
 
@@ -217,7 +219,7 @@ Use blockBanners on almost every request to get clean captures. Combine blockAds
 function createConfiguredServer() {
   const srv = new McpServer({
     name: 'pagebolt',
-    version: '1.6.2',
+    version: '1.7.0',
   }, {
     instructions: SERVER_INSTRUCTIONS,
   });
@@ -304,6 +306,8 @@ server.tool(
     extractMetadata: z.boolean().optional().describe('Extract page metadata (title, description, OG tags) alongside the screenshot'),
     // ── Styling ──
     style: styleSchema,
+    // ── Session ──
+    session_id: z.string().optional().describe('Persistent session ID (Starter+ only). Reuse a live browser page created with create_session — browser state (cookies, localStorage, auth) carries over from previous requests in this session.'),
   },
   async (params) => {
     if (!params.url && !params.html && !params.markdown) {
@@ -514,6 +518,7 @@ server.tool(
     blockChats: z.boolean().optional().describe('Block live chat widgets'),
     blockTrackers: z.boolean().optional().describe('Block tracking scripts'),
     deviceScaleFactor: z.number().min(1).max(3).optional().describe('Device pixel ratio (default: 1)'),
+    session_id: z.string().optional().describe('Persistent session ID (Starter+ only). Reuse a live browser page created with create_session — browser state (cookies, localStorage, auth) carries over from previous requests in this session.'),
   },
   async (params) => {
     if (!params.steps || params.steps.length === 0) {
@@ -932,6 +937,66 @@ server.tool(
             `  Used:      ${usage.current.toLocaleString()} / ${usage.limit.toLocaleString()} requests\n` +
             `  Remaining: ${usage.remaining.toLocaleString()}\n` +
             `  Usage:     ${pct}%`,
+        },
+      ],
+    };
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════════
+// Tool: create_session — Persistent browser session (Starter+ only)
+// ═══════════════════════════════════════════════════════════════════
+server.tool(
+  'create_session',
+  'Create a persistent browser session (Starter+ plan required). The session keeps a live browser page open so you can reuse cookies, localStorage, and auth state across multiple take_screenshot or run_sequence calls. Pass the returned session_id to those tools. Sessions expire after 10 minutes of inactivity (hard cap: 30 minutes). Useful for AI agent workflows that log in once and then take multiple screenshots of authenticated pages.',
+  {
+    cookies: z.array(cookieSchema).optional().describe('Cookies to pre-load into the session browser page'),
+    viewport: z.object({
+      width: z.number().int().optional(),
+      height: z.number().int().optional(),
+    }).optional().describe('Viewport dimensions for the session browser page'),
+    stealth: z.boolean().optional().describe('Launch this session with stealth mode (bypasses bot detection). Note: stealth sessions use a dedicated browser and consume more memory.'),
+  },
+  async (params) => {
+    const res = await callApi('/api/v1/sessions', {
+      method: 'POST',
+      body: params,
+    });
+    const data = await res.json();
+    return {
+      content: [
+        {
+          type: 'text',
+          text:
+            `Session created.\n` +
+            `  session_id: ${data.session_id}\n` +
+            `  expires_at: ${data.expires_at}\n\n` +
+            `Pass session_id to take_screenshot or run_sequence to reuse this browser page.\n` +
+            `Note: ${data.note || 'Sessions do not persist across server restarts.'}`,
+        },
+      ],
+    };
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════════
+// Tool: destroy_session — Explicitly close a persistent session
+// ═══════════════════════════════════════════════════════════════════
+server.tool(
+  'destroy_session',
+  'Explicitly destroy a persistent browser session before it expires. Frees the browser page immediately. Use this when you are done with a session to free up capacity.',
+  {
+    session_id: z.string().describe('The session ID to destroy (returned by create_session)'),
+  },
+  async (params) => {
+    await callApi(`/api/v1/sessions/${encodeURIComponent(params.session_id)}`, {
+      method: 'DELETE',
+    });
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Session ${params.session_id} destroyed successfully.`,
         },
       ],
     };
