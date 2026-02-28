@@ -980,6 +980,27 @@ server.tool(
 );
 
 // ═══════════════════════════════════════════════════════════════════
+// Tool: list_sessions — List active persistent browser sessions
+// ═══════════════════════════════════════════════════════════════════
+server.tool(
+  'list_sessions',
+  'List all active persistent browser sessions for your API key. Returns session IDs, creation times, and expiry times. Useful for checking which sessions are still alive before reusing them.',
+  {},
+  async () => {
+    const data = await callApi('/api/v1/sessions', { method: 'GET' });
+    const sessions = data.sessions || [];
+    if (sessions.length === 0) {
+      return { content: [{ type: 'text', text: 'No active sessions.' }] };
+    }
+    const lines = sessions.map(s =>
+      `• ${s.session_id}  expires: ${s.expires_at}  created: ${s.created_at}`
+    );
+    return {
+      content: [{ type: 'text', text: `Active sessions (${sessions.length}):\n${lines.join('\n')}` }],
+    };
+  }
+);
+
 // Tool: destroy_session — Explicitly close a persistent session
 // ═══════════════════════════════════════════════════════════════════
 server.tool(
@@ -1091,32 +1112,38 @@ Call take_screenshot with:
 **Pace:** ${pace}
 **Format:** ${format}
 
-Please follow this workflow:
+Follow this exact workflow — do not skip steps:
 
-1. First, call inspect_page on ${args.url} (with blockBanners: true) to discover the page structure and get reliable CSS selectors.
+**Step 1 — Inspect the page first**
+Call inspect_page on ${args.url} with blockBanners: true. Use the returned selectors for ALL interactive elements in your steps. Never guess selectors.
 
-2. Based on the inspection results and the description above, plan a sequence of steps (navigate, click, fill, scroll, wait, etc.) that demonstrates the described flow.
+**Step 2 — Plan the steps**
+Based on the inspection and the description, plan 5–12 action steps. Rules:
+- Add a "note" field on every step EXCEPT wait/wait_for — notes create a guided-tour tooltip overlay.
+- After every click or navigate that loads new content, add a wait step with live: true (so the video captures the page actually loading, not a frozen blank frame). Example:
+  { "action": "click", "selector": "...", "note": "..." },
+  { "action": "wait", "ms": 1500, "live": true }
+- Do NOT pad with wait steps between steps that don't need load time — pace handles inter-step timing automatically.
+- Do NOT use zoom unless the user explicitly asked for it.
 
-3. Call record_video with:
+**Step 3 — Write the narration script**
+Write an audioGuide.script that matches the step count. Format:
+  "Opening the app. {{1}} Navigate to the dashboard. {{2}} Click export. {{3}} The report downloads instantly. Try it free at [site URL]."
+- One {{N}} marker per meaningful action step (skip wait steps in the count).
+- Always end with a sentence AFTER the last {{N}} — this becomes the outro and prevents trailing silence.
+- Audio is the master clock: the video trims or extends to match TTS duration.
+
+**Step 4 — Call record_video** with:
    - The planned steps array
    - format: "${format}"
    - pace: "${pace}"
+   - darkMode: true (prevents white-background contrast issues with styled backgrounds)
    - blockBanners: true
    - cursor: { style: "classic", visible: true, persist: true }
-   - clickEffect: { style: "ripple" }${frameConfig}${bgConfig}
+   - clickEffect: { style: "ripple" }
+   - audioGuide: { enabled: true, script: "[your script from Step 3]" }${frameConfig}${bgConfig}
 
-Important tips:
-- Use selectors from the inspect_page results — never guess selectors
-- Do NOT add wait steps between every action — the pace parameter already handles timing between steps. Only use wait when: (1) the page needs time to load new content after navigation, or (2) you need to hold on a view for narration.
-- Do NOT use zoom unless I specifically ask for it
-- **ALWAYS add a "note" field on every meaningful step** — notes render as styled tooltip annotations that explain what's happening, creating a guided tour experience. Examples:
-  - navigate: note: "Opening the dashboard"
-  - click: note: "This button creates a new project"
-  - fill: note: "Enter your email to get started"
-  - hover: note: "Hover to reveal the dropdown menu"
-  - The ONLY steps without notes should be wait/wait_for (pauses)
-- Keep to 5-15 action steps for best results. Fewer steps = faster encoding and smaller files.
-- Each video costs 3 API requests`,
+Each video costs 3 API requests. Keep steps to 5–12 for fastest encoding.`,
             },
           },
         ],

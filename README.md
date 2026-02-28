@@ -178,21 +178,113 @@ Inspect a web page and get a structured map of all interactive elements, heading
 
 ### `record_video`
 
-Record a professional demo video of a multi-step browser automation sequence with cursor effects, click animations, and smooth movement.
+Record a professional demo video of a multi-step browser automation sequence with cursor effects, click animations, smooth movement, and optional AI voice narration.
 
 **Key parameters:**
 - `steps` — same actions as `run_sequence` (except no screenshot/pdf — the whole sequence is the video)
 - `format` — `mp4`, `webm`, or `gif` (default: mp4; webm/gif require Starter+)
 - `framerate` — 24, 30, or 60 fps (default: 30)
 - `pace` — speed preset: `"fast"`, `"normal"`, `"slow"`, `"dramatic"`, `"cinematic"`, or a number 0.25–6.0
-- `cursor` — style (`highlight`/`circle`/`spotlight`/`dot`), color, size, smoothing
+- `cursor` — style (`highlight`/`circle`/`spotlight`/`dot`/`classic`), color, size, smoothing, persist
 - `clickEffect` — style (`ripple`/`pulse`/`ring`), color
 - `zoom` — auto-zoom on clicks with configurable level and duration
+- `frame` — browser chrome: `{ enabled: true, style: "macos" }` adds a macOS title bar
+- `background` — styled background: `{ enabled: true, type: "gradient", gradient: "midnight", padding: 40, borderRadius: 12 }`
+- `audioGuide` — AI voice narration: `{ enabled: true, script: "Intro. {{1}} Step one. {{2}} Step two. Outro." }`
+- `darkMode` — emulate dark color scheme in the browser (recommended for light-background sites)
+- `blockBanners` — hide cookie consent popups (use on almost every recording)
 - `saveTo` — output file path
 
 **Example prompts:**
 - "Record a video of logging into https://example.com with a spotlight cursor"
-- "Make a demo video of the signup flow at slow pace, save as demo.mp4"
+- "Make a narrated demo video of the signup flow at slow pace, save as demo.mp4"
+- "Record a demo of https://example.com with a macOS frame and midnight background"
+
+---
+
+#### Best Practices for Polished Video Demos
+
+**1. Always inspect_page first**
+
+Never guess CSS selectors. Call `inspect_page` on the target URL before building your steps — it returns exact selectors for every button, input, and link. Guessed selectors like `button.primary` frequently miss; discovered selectors like `#radix-trigger-tab-dashboard` always hit.
+
+```
+1. inspect_page(url, { blockBanners: true })
+2. record_video(steps using selectors from step 1, ...)
+```
+
+**2. Use `live: true` on wait steps after clicks and navigations**
+
+After a click or navigate, content loads asynchronously. `live: false` (the default) freezes a single frame immediately — before anything renders. Set `live: true` on any wait step that follows an interaction so the video captures the actual page loading.
+
+```json
+{ "action": "click", "selector": "#submit-btn", "note": "Submitting the form" },
+{ "action": "wait", "ms": 2000, "live": true }
+```
+
+**3. Use `darkMode: true` for light-background sites**
+
+If the target site has a white or very light background, it will clash with gradient/glass video backgrounds. Set `darkMode: true` to emulate `prefers-color-scheme: dark` — most modern sites adapt cleanly, and the result looks far more polished on screen.
+
+**4. Use `pace`, not wait steps, for timing**
+
+`pace` automatically inserts pauses between every step. Only use `wait` steps when the page genuinely needs load time (after navigation, after a click that triggers a fetch). Don't pad every transition with a wait — it creates dead air.
+
+| Use case | What to do |
+|----------|-----------|
+| Natural pacing between steps | Set `pace: "slow"` or `pace: "dramatic"` |
+| Page needs to load after click | `{ action: "wait", ms: 1500, live: true }` |
+| Hold on a view for narration | `{ action: "wait", ms: 3000, live: true }` |
+
+**5. Write an outro in the narration script**
+
+Audio is the master clock — the video trims or extends to match the TTS duration. Always end your `audioGuide.script` with a sentence after the last `{{N}}` marker. This prevents abrupt endings and gives the viewer a call to action.
+
+```json
+"audioGuide": {
+  "enabled": true,
+  "script": "Welcome to PageBolt. {{1}} First, navigate to the dashboard. {{2}} Click on the export button. {{3}} Your report downloads instantly. Try it free at pagebolt.dev."
+}
+```
+
+The text after `{{3}}` plays over the final frames as a clean outro. Without it, the audio ends mid-sequence and the remaining video plays in silence.
+
+**6. Add notes on every meaningful step**
+
+Notes render as styled tooltip overlays during playback. Add a `"note"` field on every action step except `wait`/`wait_for`. Keep them short (under 80 chars). They turn a raw browser recording into a guided tour.
+
+```json
+{ "action": "navigate", "url": "https://example.com", "note": "Opening the dashboard" },
+{ "action": "click", "selector": "#export-btn", "note": "Click to export as PDF" }
+```
+
+**7. Complete polished video example**
+
+```json
+{
+  "steps": [
+    { "action": "navigate", "url": "https://app.example.com", "note": "Opening the app" },
+    { "action": "wait", "ms": 1500, "live": true },
+    { "action": "click", "selector": "#tab-reports", "note": "Switch to the Reports tab" },
+    { "action": "wait", "ms": 1200, "live": true },
+    { "action": "click", "selector": "#btn-export", "note": "Export the current report" },
+    { "action": "wait", "ms": 2000, "live": true },
+    { "action": "scroll", "y": 400, "note": "Scroll to see the full results" }
+  ],
+  "pace": "slow",
+  "format": "mp4",
+  "darkMode": true,
+  "blockBanners": true,
+  "frame": { "enabled": true, "style": "macos", "theme": "dark" },
+  "background": { "enabled": true, "type": "gradient", "gradient": "midnight", "padding": 40, "borderRadius": 12 },
+  "cursor": { "style": "classic", "visible": true, "persist": true },
+  "clickEffect": { "style": "ripple" },
+  "audioGuide": {
+    "enabled": true,
+    "script": "Here's how the export flow works. {{1}} Open the app and navigate to the dashboard. {{2}} Switch to the Reports tab. {{3}} Click Export. {{4}} Your report is ready in seconds. Try it free at example.com."
+  }
+}
+```
 
 ### `list_devices`
 
