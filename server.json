@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.Custodia-Admin/pagebolt",
-  "description": "Take screenshots, generate PDFs, and create OG images from your AI assistant.",
+  "description": "Screenshots, PDFs, OG images, page inspection, and narrated video recording for Claude and Cursor.",
   "repository": {
     "url": "https://github.com/Custodia-Admin/pagebolt-mcp",
     "source": "github"
   },
-  "version": "1.0.2",
+  "version": "1.8.1",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "pagebolt-mcp",
-      "version": "1.0.2",
+      "version": "1.8.1",
       "transport": {
         "type": "stdio"
       },
