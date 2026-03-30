@@ -50,35 +50,62 @@ function requireApiKey() {
   }
 }
 
-// ─── HTTP helper ─────────────────────────────────────────────────
+// ─── HTTP helper (with timeout + retry) ─────────────────────────
+const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
+const MAX_RETRIES = 1;
+const REQUEST_TIMEOUT_MS = 120_000;
+
 async function callApi(endpoint, options = {}) {
   requireApiKey();
   const url = `${BASE_URL}${endpoint}`;
   const method = options.method || 'GET';
   const headers = {
     'x-api-key': API_KEY,
-    'user-agent': 'pagebolt-mcp/1.7.0',
+    'user-agent': 'pagebolt-mcp/1.8.2',
     ...(options.body ? { 'Content-Type': 'application/json' } : {}),
   };
+  const body = options.body ? JSON.stringify(options.body) : undefined;
 
-  const res = await fetch(url, {
-    method,
-    headers,
-    body: options.body ? JSON.stringify(options.body) : undefined,
-  });
+  let lastError;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
-  if (!res.ok) {
-    let errorMsg;
     try {
-      const errJson = await res.json();
-      errorMsg = errJson.error || JSON.stringify(errJson);
-    } catch {
-      errorMsg = `HTTP ${res.status} ${res.statusText}`;
-    }
-    throw new Error(`PageBolt API error: ${errorMsg}`);
-  }
+      const res = await fetch(url, { method, headers, body, signal: controller.signal });
+      clearTimeout(timer);
 
-  return res;
+      if (res.ok) return res;
+
+      if (RETRYABLE_STATUSES.has(res.status) && attempt < MAX_RETRIES) {
+        const retryAfter = parseInt(res.headers.get('retry-after'), 10);
+        const delayMs = retryAfter > 0 ? retryAfter * 1000 : 1000 * (attempt + 1);
+        await new Promise(r => setTimeout(r, Math.min(delayMs, 10_000)));
+        continue;
+      }
+
+      let errorMsg;
+      try {
+        const errJson = await res.json();
+        errorMsg = errJson.error || JSON.stringify(errJson);
+      } catch {
+        errorMsg = `HTTP ${res.status} ${res.statusText}`;
+      }
+      throw new Error(`PageBolt API error: ${errorMsg}`);
+    } catch (err) {
+      clearTimeout(timer);
+      if (err.name === 'AbortError') {
+        throw new Error(`PageBolt API error: request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
+      }
+      lastError = err;
+      if (attempt < MAX_RETRIES && !err.message.startsWith('PageBolt API error:')) {
+        await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastError;
 }
 
 // ─── MIME type helper ────────────────────────────────────────────
@@ -219,7 +246,7 @@ Use blockBanners on almost every request to get clean captures. Combine blockAds
 function createConfiguredServer() {
   const srv = new McpServer({
     name: 'pagebolt',
-    version: '1.7.0',
+    version: '1.8.2',
   }, {
     instructions: SERVER_INSTRUCTIONS,
   });
@@ -314,35 +341,38 @@ server.tool(
       return { content: [{ type: 'text', text: 'Error: One of "url", "html", or "markdown" is required.' }], isError: true };
     }
 
-    const res = await callApi('/api/v1/screenshot', {
-      method: 'POST',
-      body: { ...params, response_type: 'json' },
-    });
-
-    const data = await res.json();
-    const format = params.format || 'png';
-
-    const content = [
-      {
-        type: 'image',
-        data: data.data,
-        mimeType: imageMimeType(format),
-      },
-      {
-        type: 'text',
-        text: `Screenshot captured successfully. Format: ${format}, Size: ${data.size_bytes} bytes, Duration: ${data.duration_ms}ms`,
-      },
-    ];
-
-    // Include metadata if extracted
-    if (data.metadata) {
-      content.push({
-        type: 'text',
-        text: `Metadata:\n${JSON.stringify(data.metadata, null, 2)}`,
+    try {
+      const res = await callApi('/api/v1/screenshot', {
+        method: 'POST',
+        body: { ...params, response_type: 'json' },
       });
-    }
 
-    return { content };
+      const data = await res.json();
+      const format = params.format || 'png';
+
+      const content = [
+        {
+          type: 'image',
+          data: data.data,
+          mimeType: imageMimeType(format),
+        },
+        {
+          type: 'text',
+          text: `Screenshot captured successfully. Format: ${format}, Size: ${data.size_bytes} bytes, Duration: ${data.duration_ms}ms`,
+        },
+      ];
+
+      if (data.metadata) {
+        content.push({
+          type: 'text',
+          text: `Metadata:\n${JSON.stringify(data.metadata, null, 2)}`,
+        });
+      }
+
+      return { content };
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Screenshot error: ${err.message}` }], isError: true };
+    }
   }
 );
 
@@ -381,49 +411,51 @@ server.tool(
       return { content: [{ type: 'text', text: 'Error: Either "url" or "html" is required.' }], isError: true };
     }
 
-    const { saveTo, ...apiParams } = params;
-    const res = await callApi('/api/v1/pdf', {
-      method: 'POST',
-      body: { ...apiParams, response_type: 'json' },
-    });
-
-    const data = await res.json();
-
-    // Best-effort save to disk (may fail in hosted/sandboxed environments)
-    let savedPath = null;
     try {
-      const outputPath = safePath(saveTo, './output.pdf');
-      const buffer = Buffer.from(data.data, 'base64');
-      writeFileSync(outputPath, buffer);
-      savedPath = outputPath;
-    } catch (_diskErr) {
-      // Disk write failed (e.g. hosted environment, read-only FS) — data is
-      // still returned as an embedded resource below, so the client gets it.
-    }
+      const { saveTo, ...apiParams } = params;
+      const res = await callApi('/api/v1/pdf', {
+        method: 'POST',
+        body: { ...apiParams, response_type: 'json' },
+      });
 
-    const fileNote = savedPath
-      ? `  File: ${savedPath}`
-      : `  File: (not saved to disk — use the embedded resource data below)`;
+      const data = await res.json();
 
-    return {
-      content: [
-        {
-          type: 'resource',
-          resource: {
-            uri: 'pagebolt://pdf/output.pdf',
-            mimeType: 'application/pdf',
-            blob: data.data,   // base64-encoded PDF — always delivered to client
+      let savedPath = null;
+      try {
+        const outputPath = safePath(saveTo, './output.pdf');
+        const buffer = Buffer.from(data.data, 'base64');
+        writeFileSync(outputPath, buffer);
+        savedPath = outputPath;
+      } catch (_diskErr) {
+        // Disk write failed — data still returned as embedded resource
+      }
+
+      const fileNote = savedPath
+        ? `  File: ${savedPath}`
+        : `  File: (not saved to disk — use the embedded resource data below)`;
+
+      return {
+        content: [
+          {
+            type: 'resource',
+            resource: {
+              uri: 'pagebolt://pdf/output.pdf',
+              mimeType: 'application/pdf',
+              blob: data.data,
+            },
           },
-        },
-        {
-          type: 'text',
-          text: `PDF generated successfully.\n` +
-            `${fileNote}\n` +
-            `  Size: ${data.size_bytes} bytes\n` +
-            `  Duration: ${data.duration_ms}ms`,
-        },
-      ],
-    };
+          {
+            type: 'text',
+            text: `PDF generated successfully.\n` +
+              `${fileNote}\n` +
+              `  Size: ${data.size_bytes} bytes\n` +
+              `  Duration: ${data.duration_ms}ms`,
+          },
+        ],
+      };
+    } catch (err) {
+      return { content: [{ type: 'text', text: `PDF error: ${err.message}` }], isError: true };
+    }
   }
 );
 
@@ -448,27 +480,31 @@ server.tool(
     format: z.enum(['png', 'jpeg', 'webp']).optional().describe('Image format (default: png)'),
   },
   async (params) => {
-    const res = await callApi('/api/v1/og-image', {
-      method: 'POST',
-      body: { ...params, response_type: 'json' },
-    });
+    try {
+      const res = await callApi('/api/v1/og-image', {
+        method: 'POST',
+        body: { ...params, response_type: 'json' },
+      });
 
-    const data = await res.json();
-    const format = params.format || 'png';
+      const data = await res.json();
+      const format = params.format || 'png';
 
-    return {
-      content: [
-        {
-          type: 'image',
-          data: data.data,
-          mimeType: imageMimeType(format),
-        },
-        {
-          type: 'text',
-          text: `OG image created successfully. Format: ${format}, Size: ${data.size_bytes} bytes, Duration: ${data.duration_ms}ms`,
-        },
+      return {
+        content: [
+          {
+            type: 'image',
+            data: data.data,
+            mimeType: imageMimeType(format),
+          },
+          {
+            type: 'text',
+            text: `OG image created successfully. Format: ${format}, Size: ${data.size_bytes} bytes, Duration: ${data.duration_ms}ms`,
+          },
       ],
     };
+    } catch (err) {
+      return { content: [{ type: 'text', text: `OG image error: ${err.message}` }], isError: true };
+    }
   }
 );
 
@@ -546,9 +582,19 @@ server.tool(
             text: `[${output.name}] Screenshot — ${output.format}, ${output.size_bytes} bytes, step ${output.step_index}`,
           });
         } else if (output.type === 'pdf') {
+          if (output.data) {
+            content.push({
+              type: 'resource',
+              resource: {
+                uri: `pagebolt://sequence-pdf/${output.name || `step-${output.step_index}`}`,
+                mimeType: 'application/pdf',
+                blob: output.data,
+              },
+            });
+          }
           content.push({
             type: 'text',
-            text: `[${output.name}] PDF generated — ${output.format}, ${output.size_bytes} bytes, step ${output.step_index} (base64 data available in raw response)`,
+            text: `[${output.name}] PDF generated — ${output.size_bytes} bytes, step ${output.step_index}`,
           });
         }
       }
@@ -890,26 +936,29 @@ server.tool(
   'List all available device presets for viewport emulation (e.g. iphone_14_pro, macbook_pro_14). Use the returned device names with the viewportDevice parameter in take_screenshot.',
   {},
   async () => {
-    const res = await callApi('/api/v1/devices');
-    const data = await res.json();
+    try {
+      const res = await callApi('/api/v1/devices');
+      const data = await res.json();
 
-    const lines = data.devices.map((d) => {
-      const touch = d.hasTouch ? ', touch' : '';
-      const mobile = d.isMobile ? ', mobile' : '';
-      return `  ${d.name} — ${d.viewport.width}x${d.viewport.height} @${d.viewport.deviceScaleFactor}x${mobile}${touch}`;
-    });
+      const lines = data.devices.map((d) => {
+        const mobile = d.mobile ? ', mobile' : '';
+        return `  ${d.id} — ${d.name} — ${d.width}x${d.height} @${d.deviceScaleFactor}x${mobile}`;
+      });
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text:
-            `Available device presets (${data.devices.length}):\n` +
-            lines.join('\n') +
-            `\n\nUse the device name as the "viewportDevice" parameter in take_screenshot.`,
-        },
-      ],
-    };
+      return {
+        content: [
+          {
+            type: 'text',
+            text:
+              `Available device presets (${data.devices.length}):\n` +
+              lines.join('\n') +
+              `\n\nUse the device name as the "viewportDevice" parameter in take_screenshot.`,
+          },
+        ],
+      };
+    } catch (err) {
+      return { content: [{ type: 'text', text: `List devices error: ${err.message}` }], isError: true };
+    }
   }
 );
 
@@ -921,25 +970,29 @@ server.tool(
   'Check your current PageBolt API usage and plan limits.',
   {},
   async () => {
-    const res = await callApi('/api/v1/usage');
-    const data = await res.json();
+    try {
+      const res = await callApi('/api/v1/usage');
+      const data = await res.json();
 
-    const { plan, usage } = data;
-    const pct = usage.limit > 0 ? Math.round((usage.current / usage.limit) * 100) : 0;
+      const { plan, usage } = data;
+      const pct = usage.limit > 0 ? Math.round((usage.current / usage.limit) * 100) : 0;
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text:
-            `PageBolt Usage\n` +
-            `  Plan:      ${plan}\n` +
-            `  Used:      ${usage.current.toLocaleString()} / ${usage.limit.toLocaleString()} requests\n` +
-            `  Remaining: ${usage.remaining.toLocaleString()}\n` +
-            `  Usage:     ${pct}%`,
-        },
-      ],
-    };
+      return {
+        content: [
+          {
+            type: 'text',
+            text:
+              `PageBolt Usage\n` +
+              `  Plan:      ${plan}\n` +
+              `  Used:      ${usage.current.toLocaleString()} / ${usage.limit.toLocaleString()} requests\n` +
+              `  Remaining: ${usage.remaining.toLocaleString()}\n` +
+              `  Usage:     ${pct}%`,
+          },
+        ],
+      };
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Usage check error: ${err.message}` }], isError: true };
+    }
   }
 );
 
@@ -958,24 +1011,28 @@ server.tool(
     stealth: z.boolean().optional().describe('Launch this session with stealth mode (bypasses bot detection). Note: stealth sessions use a dedicated browser and consume more memory.'),
   },
   async (params) => {
-    const res = await callApi('/api/v1/sessions', {
-      method: 'POST',
-      body: params,
-    });
-    const data = await res.json();
-    return {
-      content: [
-        {
-          type: 'text',
-          text:
-            `Session created.\n` +
-            `  session_id: ${data.session_id}\n` +
-            `  expires_at: ${data.expires_at}\n\n` +
-            `Pass session_id to take_screenshot or run_sequence to reuse this browser page.\n` +
-            `Note: ${data.note || 'Sessions do not persist across server restarts.'}`,
-        },
-      ],
-    };
+    try {
+      const res = await callApi('/api/v1/sessions', {
+        method: 'POST',
+        body: params,
+      });
+      const data = await res.json();
+      return {
+        content: [
+          {
+            type: 'text',
+            text:
+              `Session created.\n` +
+              `  session_id: ${data.session_id}\n` +
+              `  expires_at: ${data.expires_at}\n\n` +
+              `Pass session_id to take_screenshot or run_sequence to reuse this browser page.\n` +
+              `Note: ${data.note || 'Sessions do not persist across server restarts.'}`,
+          },
+        ],
+      };
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Create session error: ${err.message}` }], isError: true };
+    }
   }
 );
 
@@ -987,17 +1044,22 @@ server.tool(
   'List all active persistent browser sessions for your API key. Returns session IDs, creation times, and expiry times. Useful for checking which sessions are still alive before reusing them.',
   {},
   async () => {
-    const data = await callApi('/api/v1/sessions', { method: 'GET' });
-    const sessions = data.sessions || [];
-    if (sessions.length === 0) {
-      return { content: [{ type: 'text', text: 'No active sessions.' }] };
+    try {
+      const res = await callApi('/api/v1/sessions', { method: 'GET' });
+      const data = await res.json();
+      const sessions = data.sessions || [];
+      if (sessions.length === 0) {
+        return { content: [{ type: 'text', text: 'No active sessions.' }] };
+      }
+      const lines = sessions.map(s =>
+        `• ${s.session_id}  expires: ${s.expires_at}  created: ${s.created_at}`
+      );
+      return {
+        content: [{ type: 'text', text: `Active sessions (${sessions.length}):\n${lines.join('\n')}` }],
+      };
+    } catch (err) {
+      return { content: [{ type: 'text', text: `List sessions error: ${err.message}` }], isError: true };
     }
-    const lines = sessions.map(s =>
-      `• ${s.session_id}  expires: ${s.expires_at}  created: ${s.created_at}`
-    );
-    return {
-      content: [{ type: 'text', text: `Active sessions (${sessions.length}):\n${lines.join('\n')}` }],
-    };
   }
 );
 
@@ -1010,17 +1072,21 @@ server.tool(
     session_id: z.string().describe('The session ID to destroy (returned by create_session)'),
   },
   async (params) => {
-    await callApi(`/api/v1/sessions/${encodeURIComponent(params.session_id)}`, {
-      method: 'DELETE',
-    });
-    return {
-      content: [
-        {
-          type: 'text',
-          text: `Session ${params.session_id} destroyed successfully.`,
-        },
-      ],
-    };
+    try {
+      await callApi(`/api/v1/sessions/${encodeURIComponent(params.session_id)}`, {
+        method: 'DELETE',
+      });
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Session ${params.session_id} destroyed successfully.`,
+          },
+        ],
+      };
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Destroy session error: ${err.message}` }], isError: true };
+    }
   }
 );
 
