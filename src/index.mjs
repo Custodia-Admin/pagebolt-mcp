@@ -61,7 +61,7 @@ async function callApi(endpoint, options = {}) {
   const method = options.method || 'GET';
   const headers = {
     'x-api-key': API_KEY,
-    'user-agent': 'pagebolt-mcp/1.8.2',
+    'user-agent': 'pagebolt-mcp/1.9.0',
     ...(options.body ? { 'Content-Type': 'application/json' } : {}),
   };
   const body = options.body ? JSON.stringify(options.body) : undefined;
@@ -159,7 +159,7 @@ const styleSchema = z.object({
 
 // ─── Server Instructions ────────────────────────────────────────
 const SERVER_INSTRUCTIONS = `
-PageBolt gives you 8 tools for web capture and browser automation. All tools use your API key automatically.
+PageBolt gives you tools for web capture and browser automation. All tools use your API key automatically.
 
 ## Tools Overview
 
@@ -168,13 +168,19 @@ PageBolt gives you 8 tools for web capture and browser automation. All tools use
 | take_screenshot | Capture a URL, HTML, or Markdown as PNG/JPEG/WebP | 1 request |
 | generate_pdf | Convert a URL or HTML to PDF, saves to disk | 1 request |
 | create_og_image | Generate social card images from templates or custom HTML | 1 request |
-| run_sequence | Multi-step browser automation with multiple screenshot/PDF outputs | 1 request per output |
+| observe_page | Agent-optimized page observation: id-indexed elements, page-type classification, suggested actions (+ optional content/ARIA/screenshot) | 1 request |
+| visual_diff | Pixel-level visual comparison of two pages | 1 request |
+| run_sequence | Multi-step browser automation with screenshot/PDF/diff outputs | 1 request per output |
 | record_video | Record browser automation as MP4/WebM/GIF with cursor effects | 3 requests |
 | inspect_page | Get structured map of page elements with CSS selectors | 1 request |
 | list_devices | List 25+ device presets (iPhone, iPad, MacBook, etc.) | 0 (free) |
 | check_usage | Check current API usage and plan limits | 0 (free) |
 | create_session | Create a persistent browser session (Starter+ only) | 0 (free to create) |
 | destroy_session | Destroy a persistent browser session | 0 (free) |
+
+## Agent Perception: observe_page vs inspect_page
+
+For AI agents that need to understand and act on an arbitrary page, prefer **observe_page** — it returns a compact, token-budgeted observation (id-indexed elements + page-type + grouped suggested actions) in one call, and can optionally bundle readable content, the ARIA tree, and a screenshot. Use **inspect_page** when you specifically want the full raw element/heading/link/image inventory. Both return reliable CSS selectors you can pass to run_sequence.
 
 ## Key Workflow: Inspect Before You Interact
 
@@ -184,6 +190,14 @@ When building sequences or videos, ALWAYS use inspect_page first to discover rel
 2. run_sequence or record_video — use the selectors from step 1
 
 This avoids guessing selectors like "#submit" when the actual element is "#submitBtn".
+
+## Visual Diff
+
+Use visual_diff to compare two pages pixel-by-pixel. Returns a diff image with changed pixels highlighted in red.
+- Supports fullPage: true to diff entire scrollable pages (not just the viewport)
+- Supports all screenshot options: device emulation, dark mode, selectors, blocking, etc.
+- Use in run_sequence as a "diff" step to automate browser interactions before comparing — navigate, click, fill forms, then diff against another URL.
+- threshold: 0.1 (default) — lower values catch more subtle differences
 
 ## Styling Screenshots
 
@@ -226,8 +240,9 @@ Use blockBanners on almost every request to get clean captures. Combine blockAds
 - response_type: "json" returns base64 data instead of binary (useful for programmatic use)
 - record_video pace presets: "fast" (0.5x), "normal" (1x), "slow" (2x), "dramatic" (3x), "cinematic" (4.5x)
 - record_video cursor styles: "highlight", "circle", "spotlight", "dot", "classic"
-- run_sequence requires at least 1 screenshot or pdf step as output
-- record_video does NOT allow screenshot/pdf steps — the whole sequence IS the video
+- run_sequence requires at least 1 output step (screenshot, pdf, or diff)
+- run_sequence supports "diff" steps: automate interactions, then diff current page against another URL/HTML
+- record_video does NOT allow screenshot/pdf/diff steps — the whole sequence IS the video
 - Max 2 evaluate (JavaScript) steps per sequence/video
 - fullPage: true on screenshots captures the entire scrollable page
 - fullPageScroll: true triggers lazy-loaded images before capture
@@ -236,8 +251,8 @@ Use blockBanners on almost every request to get clean captures. Combine blockAds
 
 | Action | Cost |
 |--------|------|
-| Screenshot, PDF, OG image, Inspect | 1 request each |
-| Sequence | 1 request per output (screenshot/pdf) |
+| Screenshot, PDF, OG image, Inspect, Visual Diff | 1 request each |
+| Sequence | 1 request per output (screenshot/pdf/diff) |
 | Video recording | 3 requests flat |
 | list_devices, check_usage | Free |
 `.trim();
@@ -246,7 +261,7 @@ Use blockBanners on almost every request to get clean captures. Combine blockAds
 function createConfiguredServer() {
   const srv = new McpServer({
     name: 'pagebolt',
-    version: '1.8.2',
+    version: '1.9.0',
   }, {
     instructions: SERVER_INSTRUCTIONS,
   });
@@ -513,14 +528,14 @@ server.tool(
 // ═══════════════════════════════════════════════════════════════════
 server.tool(
   'run_sequence',
-  'Execute a multi-step browser automation sequence. Navigate pages, interact with elements (click, fill, select), and capture multiple screenshots/PDFs in a single browser session. Each output counts as 1 API request.',
+  'Execute a multi-step browser automation sequence. Navigate pages, interact with elements (click, fill, select), and capture multiple screenshots/PDFs/diffs in a single browser session. Use the "diff" step to compare the current page state against another URL after automation. Each output counts as 1 API request.',
   {
     steps: z.array(
       z.object({
         action: z.enum([
           'navigate', 'click', 'dblclick', 'fill', 'select', 'hover',
           'scroll', 'wait', 'wait_for', 'evaluate',
-          'screenshot', 'pdf',
+          'screenshot', 'pdf', 'diff',
         ]).describe('The action to perform'),
         url: z.string().url().optional().describe('URL to navigate to (for navigate action)'),
         selector: z.string().optional().describe('CSS selector for the target element (also used for element screenshots)'),
@@ -530,20 +545,25 @@ server.tool(
         x: z.number().optional().describe('Horizontal scroll position in pixels (scroll action). Use when scrolling horizontally without a selector.'),
         y: z.number().optional().describe('Vertical scroll position in pixels (scroll action). REQUIRED when no selector is provided — e.g. {"action":"scroll","y":800} scrolls 800px down.'),
         script: z.string().max(5000).optional().describe('JavaScript to execute in page context (for evaluate action)'),
-        name: z.string().optional().describe('Name for the output (for screenshot/pdf actions)'),
+        name: z.string().optional().describe('Name for the output (for screenshot/pdf/diff actions)'),
         format: z.string().optional().describe('Image format: png, jpeg, webp (screenshot) or A4, Letter (pdf)'),
-        fullPage: z.boolean().optional().describe('Capture full scrollable page (for screenshot action)'),
-        fullPageScroll: z.boolean().optional().describe('Auto-scroll for lazy images (for screenshot action)'),
+        fullPage: z.boolean().optional().describe('Capture full scrollable page (for screenshot/diff actions)'),
+        fullPageScroll: z.boolean().optional().describe('Auto-scroll for lazy images (for screenshot/diff actions)'),
         quality: z.number().int().min(1).max(100).optional().describe('JPEG/WebP quality (for screenshot action)'),
         omitBackground: z.boolean().optional().describe('Transparent background (for screenshot action)'),
-        delay: z.number().int().min(0).max(10000).optional().describe('Pre-capture delay in ms (for screenshot action)'),
+        delay: z.number().int().min(0).max(10000).optional().describe('Pre-capture delay in ms (for screenshot/diff actions)'),
         landscape: z.boolean().optional().describe('Landscape orientation (for pdf action)'),
         printBackground: z.boolean().optional().describe('Include CSS backgrounds (for pdf action)'),
         margin: z.string().optional().describe('CSS margin for all sides (for pdf action)'),
         scale: z.number().min(0.1).max(2).optional().describe('Rendering scale (for pdf action)'),
         style: styleSchema,
+        // ── Diff-specific step properties ──
+        url_b: z.string().url().optional().describe('URL of the comparison page (for diff action). The current page state is "A"; this URL is rendered as "B".'),
+        html_b: z.string().optional().describe('HTML of the comparison page (for diff action). The current page state is "A"; this HTML is rendered as "B".'),
+        selector_a: z.string().optional().describe('CSS selector to capture on the current page as side "A" (for diff action). If omitted, captures the full viewport/page.'),
+        threshold: z.number().min(0).max(1).optional().describe('Pixelmatch sensitivity 0–1 (for diff action, default: 0.1). Lower = more sensitive.'),
       })
-    ).min(1).max(20).describe('Array of steps to execute in order. Must include at least one screenshot or pdf step. Max 20 steps, max 5 outputs.'),
+    ).min(1).max(20).describe('Array of steps to execute in order. Must include at least one output step (screenshot, pdf, or diff). Max 20 steps, max 5 outputs.'),
     viewport: z.object({
       width: z.number().int().min(320).max(3840).optional().describe('Viewport width (default: 1280)'),
       height: z.number().int().min(200).max(2160).optional().describe('Viewport height (default: 720)'),
@@ -595,6 +615,20 @@ server.tool(
           content.push({
             type: 'text',
             text: `[${output.name}] PDF generated — ${output.size_bytes} bytes, step ${output.step_index}`,
+          });
+        } else if (output.type === 'diff') {
+          content.push({
+            type: 'image',
+            data: output.data,
+            mimeType: 'image/png',
+          });
+          content.push({
+            type: 'text',
+            text: `[${output.name}] Diff — ${output.changed_pct}% changed (${output.changed_pixels?.toLocaleString()} of ${output.total_pixels?.toLocaleString()} pixels), step ${output.step_index}` +
+              (output.changed_pct === 0 ? ' — Pages are visually identical.' :
+               output.changed_pct < 1 ? ' — Minor differences.' :
+               output.changed_pct < 10 ? ' — Moderate differences.' :
+               ' — Significant differences.'),
           });
         }
       }
@@ -924,6 +958,235 @@ server.tool(
       };
     } catch (err) {
       return { content: [{ type: 'text', text: `Inspect error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════════
+// Tool: observe_page — agent-optimized page observation (perception layer)
+// ═══════════════════════════════════════════════════════════════════
+server.tool(
+  'observe_page',
+  'Get a compact, token-budgeted "observation" of any web page, purpose-built for AI agents. In ONE request it returns: id-indexed interactive elements (role, name, CSS selector, state), a heuristic page-type classification (login, signup, search, article, form, generic), and grouped "suggested actions" (login flow, search, primary buttons, navigation). Optionally include readable content (Markdown), the ARIA tree, and a screenshot. This is the fastest way for an agent to understand and act on an un-instrumented page — far more token-efficient than a raw screenshot or full DOM. Use the returned selectors with run_sequence to act. Costs 1 API request.',
+  {
+    // ── Source ──
+    url: z.string().url().optional().describe('URL to observe (required if no html)'),
+    html: z.string().optional().describe('Raw HTML to observe (required if no url)'),
+    // ── Observation shape ──
+    maxElements: z.number().int().min(1).max(150).optional().describe('Cap on interactive elements returned (default 40, max 150). Lower = fewer tokens.'),
+    includeRects: z.boolean().optional().describe('Include bounding boxes {x,y,w,h} per element (default false — omit to save tokens)'),
+    includeContent: z.boolean().optional().describe('Also extract the main readable content as Markdown (default false)'),
+    includeAriaTree: z.boolean().optional().describe('Also include the interesting-only ARIA accessibility tree (default false)'),
+    includeScreenshot: z.boolean().optional().describe('Also capture a screenshot in the same page load (default false)'),
+    screenshotFormat: z.enum(['jpeg', 'png', 'webp']).optional().describe('Screenshot format when includeScreenshot is true (default jpeg)'),
+    screenshotFullPage: z.boolean().optional().describe('Capture the full scrollable page for the screenshot (default false)'),
+    // ── Viewport ──
+    width: z.number().int().min(1).max(3840).optional().describe('Viewport width in pixels (default: 1280)'),
+    height: z.number().int().min(1).max(2160).optional().describe('Viewport height in pixels (default: 720)'),
+    viewportDevice: z.string().optional().describe('Device preset for viewport emulation (e.g. "iphone_14_pro"). Use list_devices to see all presets.'),
+    deviceScaleFactor: z.number().min(1).max(3).optional().describe('Device pixel ratio (default: 1)'),
+    // ── Timing ──
+    waitUntil: z.enum(['load', 'domcontentloaded', 'networkidle0', 'networkidle2']).optional().describe('When to consider navigation finished (default: networkidle2)'),
+    waitForSelector: z.string().optional().describe('Wait for this CSS selector to appear before observing'),
+    navigationTimeout: z.number().int().min(0).max(30000).optional().describe('Navigation timeout in ms (default: 25000)'),
+    // ── Emulation ──
+    darkMode: z.boolean().optional().describe('Emulate dark color scheme (default: false)'),
+    timeZone: z.string().optional().describe('Override browser timezone'),
+    userAgent: z.string().optional().describe('Override the browser User-Agent string'),
+    // ── Auth & headers ──
+    cookies: z.array(cookieSchema).optional().describe('Cookies to set — array of "name=value" strings or { name, value, domain? } objects'),
+    headers: z.record(z.string(), z.string()).optional().describe('Extra HTTP headers to send with the request'),
+    authorization: z.string().optional().describe('Authorization header value (e.g. "Bearer <token>")'),
+    bypassCSP: z.boolean().optional().describe('Bypass Content-Security-Policy on the page'),
+    // ── Blocking ──
+    blockBanners: z.boolean().optional().describe('Hide cookie consent banners (default: false)'),
+    blockAds: z.boolean().optional().describe('Block advertisements on the page'),
+    blockChats: z.boolean().optional().describe('Block live chat widgets'),
+    blockTrackers: z.boolean().optional().describe('Block tracking scripts'),
+  },
+  async (params) => {
+    if (!params.url && !params.html) {
+      return { content: [{ type: 'text', text: 'Error: Either "url" or "html" is required.' }], isError: true };
+    }
+
+    try {
+      const res = await callApi('/api/v1/observe', { method: 'POST', body: params });
+      const data = await res.json();
+
+      const lines = [];
+      lines.push(`Page: ${data.title || '(untitled)'} (${data.url})`);
+      lines.push(`Type: ${data.pageType}`);
+      if (data.metadata && data.metadata.httpStatusCode) lines.push(`HTTP Status: ${data.metadata.httpStatusCode}`);
+      lines.push('');
+
+      if (data.actions && data.actions.length > 0) {
+        lines.push('Suggested actions:');
+        for (const a of data.actions) {
+          lines.push(`  ${a.intent}: ${a.elementIds.join(', ')}`);
+        }
+        lines.push('');
+      }
+
+      if (data.elements && data.elements.length > 0) {
+        lines.push(`Interactive elements (${data.elements.length}):`);
+        for (const el of data.elements) {
+          let line = `  ${el.id} [${el.role}${el.type ? ` ${el.type}` : ''}]`;
+          if (el.name) line += ` "${el.name}"`;
+          if (el.state && el.state.length) line += ` {${el.state.join(',')}}`;
+          line += ` — selector: ${el.selector}`;
+          if (el.href) line += ` → ${el.href}`;
+          lines.push(line);
+        }
+        lines.push('');
+      }
+
+      if (data.forms && data.forms.length > 0) {
+        lines.push(`Forms (${data.forms.length}):`);
+        for (const f of data.forms) {
+          lines.push(`  ${f.selector} (${f.method} ${f.action || '(none)'}): fields ${f.fieldIds.join(', ')}`);
+        }
+        lines.push('');
+      }
+
+      if (data.headings && data.headings.length > 0) {
+        lines.push('Outline:');
+        for (const h of data.headings) lines.push(`  ${'  '.repeat(h.level - 1)}H${h.level}: ${h.text}`);
+        lines.push('');
+      }
+
+      if (data.content && data.content.markdown) {
+        lines.push(`Readable content (${data.content.wordCount} words):`);
+        lines.push(data.content.markdown.slice(0, 4000) + (data.content.markdown.length > 4000 ? '\n…(truncated)' : ''));
+        lines.push('');
+      }
+
+      if (data.ariaTree) {
+        lines.push('ARIA tree:');
+        lines.push(JSON.stringify(data.ariaTree, null, 2));
+        lines.push('');
+      }
+
+      lines.push(`Stats: ${data.stats.elementCount} elements, ~${data.stats.estimatedTokens} tokens. Duration: ${data.duration_ms}ms`);
+
+      const content = [{ type: 'text', text: lines.join('\n') }];
+      if (data.screenshot && data.screenshot.base64) {
+        content.unshift({ type: 'image', data: data.screenshot.base64, mimeType: imageMimeType(data.screenshot.format) });
+      }
+      return { content };
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Observe error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════════
+// Tool: visual_diff — pixel-level visual comparison
+// ═══════════════════════════════════════════════════════════════════
+server.tool(
+  'visual_diff',
+  'Compare two web pages (or HTML strings) pixel-by-pixel and return a diff image highlighting all visual differences. Supports full-page capture, device emulation, element selectors, and all screenshot-like options. Returns the diff image, changed pixel count, and percentage changed. Costs 1 API request.',
+  {
+    // ── Sources ──
+    url_a: z.string().url().optional().describe('URL of the first page (required if no html_a)'),
+    url_b: z.string().url().optional().describe('URL of the second page (required if no html_b)'),
+    html_a: z.string().optional().describe('Raw HTML for the first page (required if no url_a)'),
+    html_b: z.string().optional().describe('Raw HTML for the second page (required if no url_b)'),
+    // ── Diff sensitivity ──
+    threshold: z.number().min(0).max(1).optional().describe('Pixelmatch sensitivity 0–1 (default: 0.1). Lower = more sensitive to subtle differences.'),
+    // ── Viewport ──
+    width: z.number().int().min(1).max(3840).optional().describe('Viewport width in pixels (default: 1280)'),
+    height: z.number().int().min(1).max(2160).optional().describe('Viewport height in pixels (default: 720)'),
+    viewportDevice: z.string().optional().describe('Device preset for viewport emulation (e.g. "iphone_14_pro"). Use list_devices to see all presets.'),
+    viewportMobile: z.boolean().optional().describe('Enable mobile meta viewport emulation'),
+    viewportHasTouch: z.boolean().optional().describe('Enable touch event emulation'),
+    viewportLandscape: z.boolean().optional().describe('Landscape orientation'),
+    deviceScaleFactor: z.number().min(1).max(3).optional().describe('Device pixel ratio (default: 1)'),
+    // ── Capture region ──
+    fullPage: z.boolean().optional().describe('Capture the full scrollable page for both sides (default: false)'),
+    fullPageScroll: z.boolean().optional().describe('Auto-scroll pages before capture to trigger lazy-loaded images'),
+    fullPageScrollDelay: z.number().int().min(0).max(2000).optional().describe('Delay between scroll steps in ms (default: 400)'),
+    fullPageScrollBy: z.number().int().optional().describe('Pixels to scroll per step (default: viewport height)'),
+    fullPageMaxHeight: z.number().int().optional().describe('Maximum pixel height cap for full-page captures'),
+    selector: z.string().optional().describe('CSS selector — capture only this element on both pages'),
+    clip: z.object({
+      x: z.number(),
+      y: z.number(),
+      width: z.number(),
+      height: z.number(),
+    }).optional().describe('Crop region { x, y, width, height } in pixels'),
+    // ── Timing ──
+    delay: z.number().int().min(0).max(30000).optional().describe('Milliseconds to wait before capture on both pages (default: 0)'),
+    click: z.string().optional().describe('CSS selector to click before capturing on both pages'),
+    waitUntil: z.enum(['load', 'domcontentloaded', 'networkidle0', 'networkidle2']).optional().describe('When to consider navigation finished (default: networkidle2)'),
+    waitForSelector: z.string().optional().describe('Wait for this CSS selector to appear before capturing'),
+    navigationTimeout: z.number().int().min(0).max(30000).optional().describe('Navigation timeout in ms (default: 25000)'),
+    // ── Emulation ──
+    darkMode: z.boolean().optional().describe('Emulate dark color scheme (default: false)'),
+    reducedMotion: z.boolean().optional().describe('Emulate prefers-reduced-motion to disable animations'),
+    mediaType: z.enum(['screen', 'print']).optional().describe('Emulate CSS media type'),
+    timeZone: z.string().optional().describe('Override browser timezone (e.g. "America/New_York")'),
+    geolocation: z.object({
+      latitude: z.number(),
+      longitude: z.number(),
+      accuracy: z.number().optional(),
+    }).optional().describe('Emulate geolocation { latitude, longitude, accuracy? }'),
+    userAgent: z.string().optional().describe('Override the browser User-Agent string'),
+    // ── Auth & headers ──
+    cookies: z.array(cookieSchema).optional().describe('Cookies to set — array of "name=value" strings or { name, value, domain? } objects'),
+    headers: z.record(z.string(), z.string()).optional().describe('Extra HTTP headers to send with the request'),
+    authorization: z.string().optional().describe('Authorization header value (e.g. "Bearer <token>")'),
+    bypassCSP: z.boolean().optional().describe('Bypass Content-Security-Policy on the page'),
+    // ── Content manipulation ──
+    hideSelectors: z.array(z.string()).optional().describe('Array of CSS selectors to hide before capture'),
+    injectCss: z.string().optional().describe('Custom CSS to inject before capturing (max 50KB)'),
+    injectJs: z.string().optional().describe('Custom JavaScript to execute before capturing (max 50KB)'),
+    // ── Blocking ──
+    blockBanners: z.boolean().optional().describe('Hide cookie consent banners (default: false)'),
+    blockAds: z.boolean().optional().describe('Block advertisements on the page'),
+    blockChats: z.boolean().optional().describe('Block live chat widgets on the page'),
+    blockTrackers: z.boolean().optional().describe('Block tracking scripts on the page'),
+    blockRequests: z.array(z.string()).optional().describe('URL patterns to block (array of strings)'),
+    blockResources: z.array(z.string()).optional().describe('Resource types to block (e.g. ["image", "font"])'),
+  },
+  async (params) => {
+    if (!params.url_a && !params.html_a) {
+      return { content: [{ type: 'text', text: 'Error: One of "url_a" or "html_a" is required.' }], isError: true };
+    }
+    if (!params.url_b && !params.html_b) {
+      return { content: [{ type: 'text', text: 'Error: One of "url_b" or "html_b" is required.' }], isError: true };
+    }
+
+    try {
+      const res = await callApi('/api/v1/diff', {
+        method: 'POST',
+        body: params,
+      });
+
+      const data = await res.json();
+
+      const content = [
+        {
+          type: 'image',
+          data: data.diff_image.replace(/^data:image\/png;base64,/, ''),
+          mimeType: 'image/png',
+        },
+        {
+          type: 'text',
+          text: `Visual diff complete.\n` +
+            `  Changed: ${data.changed_pct}% (${data.changed_pixels.toLocaleString()} of ${data.total_pixels.toLocaleString()} pixels)\n` +
+            `  URL A: ${data.url_a || '(html)'}\n` +
+            `  URL B: ${data.url_b || '(html)'}\n` +
+            `  Duration: ${data.duration_ms}ms\n` +
+            (data.changed_pct === 0 ? '  Result: Pages are visually identical.' :
+             data.changed_pct < 1 ? '  Result: Minor visual differences detected.' :
+             data.changed_pct < 10 ? '  Result: Moderate visual differences detected.' :
+             '  Result: Significant visual differences detected.'),
+        },
+      ];
+
+      return { content };
+    } catch (err) {
+      return { content: [{ type: 'text', text: `Visual diff error: ${err.message}` }], isError: true };
     }
   }
 );
