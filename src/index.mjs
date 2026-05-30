@@ -191,6 +191,29 @@ When building sequences or videos, ALWAYS use inspect_page first to discover rel
 
 This avoids guessing selectors like "#submit" when the actual element is "#submitBtn".
 
+## Handling Dynamic UI: Dropdowns, Popovers, and Modals
+
+Clicking menus, avatars, profile icons, "⋯" buttons, hamburger toggles, or anything that opens a dropdown/popover/modal creates an overlay that floats ABOVE the page. This is the #1 cause of broken multi-step automations:
+- Subsequent steps get visually obscured by the still-open overlay.
+- A click intended for the underlying page lands on the overlay (or its backdrop) and navigates somewhere unexpected.
+
+Rules:
+1. **Don't open menus you don't need.** For a high-level tour, navigate directly to the destination URL (from inspect_page / observe_page) instead of clicking through a dropdown.
+2. **If you open an overlay, the very next step must commit to it** — either interact with an element INSIDE the overlay, or explicitly close it before continuing. There is no "press_key" action, so close an overlay with an evaluate step (note: max 2 evaluate steps per sequence):
+   { "action": "evaluate", "script": "document.activeElement&&document.activeElement.blur&&document.activeElement.blur();document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));" }
+   (Clicking a blank area can also work, but may hit the overlay backdrop and navigate — prefer the evaluate approach or click a known-safe element.)
+3. **Never chain clicks across a state change you haven't re-perceived.** Selectors gathered before a menu opened or a route changed may now point at the wrong (or covered) element.
+
+## Re-perceive Between Actions (avoid getting lost)
+
+run_sequence and record_video execute a FIXED, pre-planned list of steps — they do NOT re-check the page between steps. For anything beyond a short, predictable flow, work iteratively instead of blind-batching:
+1. observe_page (or take_screenshot) to see the CURRENT state.
+2. Perform ONE meaningful action (a short run_sequence, or a single click/fill).
+3. observe_page / take_screenshot AGAIN, then choose the next action from the fresh result.
+Repeat. This is how an agent recovers from unexpected popovers, redirects, or layout shifts. Use session_id (create_session, Starter+) on run_sequence to keep cookies/auth/scroll state across these iterations.
+
+For record_video specifically (one continuous capture, no mid-recording re-perception): keep the flow short and predictable, use ONLY selectors verified via inspect_page/observe_page, and add a dismiss step after anything that could open an overlay.
+
 ## Visual Diff
 
 Use visual_diff to compare two pages pixel-by-pixel. Returns a diff image with changed pixels highlighted in red.
@@ -1454,6 +1477,9 @@ Based on the inspection and the description, plan 5–12 action steps. Rules:
   { "action": "wait", "ms": 1500, "live": true }
 - Do NOT pad with wait steps between steps that don't need load time — pace handles inter-step timing automatically.
 - Do NOT use zoom unless the user explicitly asked for it.
+- **Avoid opening dropdowns/menus/popovers** unless the demo is specifically about their contents — they stay open and obscure or misdirect later steps. Prefer navigating directly to the target URL (from the inspection) over clicking through a menu. The recording cannot re-check the page between steps, so a stuck-open overlay will break everything after it.
+- If a step DOES open an overlay, the next step must either act on an element inside it or close it. There is no key-press action; close with an evaluate step (max 2 per video):
+  { "action": "evaluate", "script": "document.activeElement&&document.activeElement.blur&&document.activeElement.blur();document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));" }
 
 **Step 3 — Write the narration script**
 Write an audioGuide.script that matches the step count. Format:
