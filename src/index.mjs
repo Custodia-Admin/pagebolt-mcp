@@ -61,7 +61,7 @@ async function callApi(endpoint, options = {}) {
   const method = options.method || 'GET';
   const headers = {
     'x-api-key': API_KEY,
-    'user-agent': 'pagebolt-mcp/1.9.1',
+    'user-agent': 'pagebolt-mcp/1.10.0',
     ...(options.body ? { 'Content-Type': 'application/json' } : {}),
   };
   const body = options.body ? JSON.stringify(options.body) : undefined;
@@ -284,7 +284,7 @@ Use blockBanners on almost every request to get clean captures. Combine blockAds
 function createConfiguredServer() {
   const srv = new McpServer({
     name: 'pagebolt',
-    version: '1.9.1',
+    version: '1.10.0',
   }, {
     instructions: SERVER_INSTRUCTIONS,
   });
