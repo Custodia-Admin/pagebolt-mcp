@@ -896,10 +896,12 @@ server.tool(
     blockTrackers: z.boolean().optional().describe('Block tracking scripts'),
     blockRequests: z.array(z.string()).optional().describe('URL patterns to block'),
     blockResources: z.array(z.string()).optional().describe('Resource types to block'),
+    // ── Session ──
+    session_id: z.string().optional().describe('Inspect the LIVE state of a persistent session (Starter+; create with create_session) instead of a fresh page load. Omit url to inspect the page exactly as the last run_sequence/take_screenshot left it; pass url to navigate within the session first. Ideal for re-perceiving between agent actions.'),
   },
   async (params) => {
-    if (!params.url && !params.html) {
-      return { content: [{ type: 'text', text: 'Error: Either "url" or "html" is required.' }], isError: true };
+    if (!params.url && !params.html && !params.session_id) {
+      return { content: [{ type: 'text', text: 'Error: Either "url", "html", or "session_id" is required.' }], isError: true };
     }
 
     try {
@@ -1026,10 +1028,12 @@ server.tool(
     blockAds: z.boolean().optional().describe('Block advertisements on the page'),
     blockChats: z.boolean().optional().describe('Block live chat widgets'),
     blockTrackers: z.boolean().optional().describe('Block tracking scripts'),
+    // ── Session ──
+    session_id: z.string().optional().describe('Observe the LIVE state of a persistent session (Starter+; create with create_session) instead of a fresh page load. Omit url to observe the page exactly as the last run_sequence/take_screenshot left it; pass url to navigate within the session first. This is the recommended way to re-perceive between agent actions and recover from popovers/redirects.'),
   },
   async (params) => {
-    if (!params.url && !params.html) {
-      return { content: [{ type: 'text', text: 'Error: Either "url" or "html" is required.' }], isError: true };
+    if (!params.url && !params.html && !params.session_id) {
+      return { content: [{ type: 'text', text: 'Error: Either "url", "html", or "session_id" is required.' }], isError: true };
     }
 
     try {
