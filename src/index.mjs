@@ -61,7 +61,7 @@ async function callApi(endpoint, options = {}) {
   const method = options.method || 'GET';
   const headers = {
     'x-api-key': API_KEY,
-    'user-agent': 'pagebolt-mcp/1.10.1',
+    'user-agent': 'pagebolt-mcp/1.11.0',
     ...(options.body ? { 'Content-Type': 'application/json' } : {}),
   };
   const body = options.body ? JSON.stringify(options.body) : undefined;
@@ -215,9 +215,9 @@ Clicking menus, avatars, profile icons, "⋯" buttons, hamburger toggles, or any
 
 Rules:
 1. **Don't open menus you don't need.** For a high-level tour, navigate directly to the destination URL (from inspect_page / observe_page) instead of clicking through a dropdown.
-2. **If you open an overlay, the very next step must commit to it** — either interact with an element INSIDE the overlay, or explicitly close it before continuing. There is no "press_key" action, so close an overlay with an evaluate step (note: max 2 evaluate steps per sequence):
-   { "action": "evaluate", "script": "document.activeElement&&document.activeElement.blur&&document.activeElement.blur();document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));" }
-   (Clicking a blank area can also work, but may hit the overlay backdrop and navigate — prefer the evaluate approach or click a known-safe element.)
+2. **If you open an overlay, the very next step must commit to it** — either interact with an element INSIDE the overlay, or explicitly close it before continuing. The cleanest way to dismiss a dropdown/popover/modal is a press_key step:
+   { "action": "press_key", "key": "Escape" }
+   (Clicking a blank area can also work, but may hit the overlay backdrop and navigate — prefer press_key Escape, or click a known-safe element.)
 3. **Never chain clicks across a state change you haven't re-perceived.** Selectors gathered before a menu opened or a route changed may now point at the wrong (or covered) element.
 
 ## Re-perceive Between Actions (avoid getting lost)
@@ -300,7 +300,7 @@ Use blockBanners on almost every request to get clean captures. Combine blockAds
 function createConfiguredServer() {
   const srv = new McpServer({
     name: 'pagebolt',
-    version: '1.10.1',
+    version: '1.11.0',
   }, {
     instructions: SERVER_INSTRUCTIONS,
   });
@@ -573,12 +573,13 @@ server.tool(
       z.object({
         action: z.enum([
           'navigate', 'click', 'dblclick', 'fill', 'select', 'hover',
-          'scroll', 'wait', 'wait_for', 'evaluate',
+          'scroll', 'wait', 'wait_for', 'evaluate', 'press_key',
           'screenshot', 'pdf', 'diff',
         ]).describe('The action to perform'),
         url: z.string().url().optional().describe('URL to navigate to (for navigate action)'),
-        selector: z.string().optional().describe('CSS selector for the target element (also used for element screenshots)'),
+        selector: z.string().optional().describe('CSS selector for the target element (also used for element screenshots; optional for press_key to focus a field first)'),
         value: z.string().optional().describe('Value to type or select'),
+        key: z.enum(['Escape', 'Enter', 'Tab', 'Backspace', 'Delete', 'Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown']).optional().describe('Key to press (for press_key action). Use Escape to dismiss a dropdown/popover/modal, Enter to submit, Tab to move focus.'),
         ms: z.number().int().min(0).max(10000).optional().describe('Milliseconds to wait (for wait action)'),
         timeout: z.number().int().min(0).max(15000).optional().describe('Timeout in ms for wait_for (default: 10000)'),
         x: z.number().optional().describe('Horizontal scroll position in pixels (scroll action). Use when scrolling horizontally without a selector.'),
@@ -698,11 +699,12 @@ server.tool(
       z.object({
         action: z.enum([
           'navigate', 'click', 'dblclick', 'fill', 'select', 'hover',
-          'scroll', 'wait', 'wait_for', 'evaluate',
+          'scroll', 'wait', 'wait_for', 'evaluate', 'press_key',
         ]).describe('The action to perform (no screenshot/pdf — the whole sequence is recorded as video)'),
         url: z.string().url().optional().describe('URL to navigate to (for navigate action)'),
-        selector: z.string().optional().describe('CSS selector for the target element'),
+        selector: z.string().optional().describe('CSS selector for the target element (optional for press_key to focus a field first)'),
         value: z.string().optional().describe('Value to type or select'),
+        key: z.enum(['Escape', 'Enter', 'Tab', 'Backspace', 'Delete', 'Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown']).optional().describe('Key to press (for press_key action). Use Escape to dismiss a dropdown/popover/modal that a previous step opened — the cleanest way to avoid a stuck-open overlay obscuring later steps.'),
         ms: z.number().int().min(0).max(10000).optional().describe('Milliseconds to wait (for wait action). Only use wait steps when the page needs loading time or to hold for narration — the pace parameter handles inter-step timing automatically.'),
         timeout: z.number().int().min(0).max(15000).optional().describe('Timeout in ms for wait_for (default: 10000)'),
         x: z.number().optional().describe('Horizontal scroll position in pixels (scroll action). Use when scrolling horizontally without a selector.'),
@@ -1498,8 +1500,8 @@ Based on the inspection and the description, plan 5–12 action steps. Rules:
 - Do NOT pad with wait steps between steps that don't need load time — pace handles inter-step timing automatically.
 - Do NOT use zoom unless the user explicitly asked for it.
 - **Avoid opening dropdowns/menus/popovers** unless the demo is specifically about their contents — they stay open and obscure or misdirect later steps. Prefer navigating directly to the target URL (from the inspection) over clicking through a menu. The recording cannot re-check the page between steps, so a stuck-open overlay will break everything after it.
-- If a step DOES open an overlay, the next step must either act on an element inside it or close it. There is no key-press action; close with an evaluate step (max 2 per video):
-  { "action": "evaluate", "script": "document.activeElement&&document.activeElement.blur&&document.activeElement.blur();document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));" }
+- If a step DOES open an overlay, the next step must either act on an element inside it or close it. The cleanest way is a press_key step:
+  { "action": "press_key", "key": "Escape" }
 
 **Step 3 — Write the narration script**
 Write an audioGuide.script that matches the step count. Format:
