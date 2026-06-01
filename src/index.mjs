@@ -1638,6 +1638,10 @@ ${applyLine}
   blockBanners: true
 ${capture === 'screenshot' ? '  fullPage: true' : '  includeContent: true'}
 
+Handling notes:
+- The credential is **sensitive** — don't echo it back to the user, and prefer \`create_session\` + \`session_id\` so you authenticate once instead of resending it on every call.
+- If your credential already includes a scheme (e.g. it starts with "Bearer " or "Basic "), pass it as-is — don't prepend another "Bearer ".
+
 **Step 4 — Verify you actually got the authenticated view**
 Look at the result: if it shows a login form / "sign in" / a public landing page, the credential did NOT authenticate the render (most often: you used an API token where a session cookie was required). Report that plainly and ask the user for a session cookie rather than retrying blindly.
 
