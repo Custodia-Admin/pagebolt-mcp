@@ -615,6 +615,7 @@ server.tool(
     blockTrackers: z.boolean().optional().describe('Block tracking scripts'),
     deviceScaleFactor: z.number().min(1).max(3).optional().describe('Device pixel ratio (default: 1)'),
     session_id: z.string().optional().describe('Persistent session ID (Starter+ only). Reuse a live browser page created with create_session — browser state (cookies, localStorage, auth) carries over from previous requests in this session.'),
+    observeAfterEachStep: z.boolean().optional().describe('FREE (no extra request charged). After every step, attach a compact, token-budgeted state snapshot — page type + the top interactive elements (id/role/name/selector) + suggested actions, NO screenshot. Use this when a step might open a dropdown/popover/modal or navigate: read the trace to confirm what is now on screen and pick the right selector for the NEXT call, instead of blind-batching. Hidden/off-screen elements are filtered out.'),
   },
   async (params) => {
     if (!params.steps || params.steps.length === 0) {
@@ -679,6 +680,22 @@ server.tool(
         summary += `\nFailed steps: ${failedSteps.map(s => `Step ${s.step_index} (${s.action}): ${s.error}`).join('; ')}`;
       }
       summary += `\nUsage: ${data.usage.outputs_charged} request(s) charged, ${data.usage.remaining} remaining.`;
+
+      // Phase 3: render the compact per-step state trace (free) so the agent can
+      // course-correct on its NEXT call — e.g. notice a popover opened.
+      const traced = (data.step_results || []).filter(s => s && s.state);
+      if (traced.length > 0) {
+        const lines = traced.map(s => {
+          const st = s.state;
+          if (st.error) return `  • step ${s.step_index} (${s.action}): [state unavailable]`;
+          const els = (st.elements || []).slice(0, 6)
+            .map(e => `${e.id}:${e.role}${e.name ? ` "${e.name}"` : ''}`).join(', ');
+          const acts = (st.actions || []).map(a => a.intent).join(', ');
+          return `  • step ${s.step_index} (${s.action}) → ${st.pageType} @ ${st.url}\n` +
+                 `    elements: ${els || '(none)'}` + (acts ? `\n    actions: ${acts}` : '');
+        });
+        summary += `\n\nState trace (observeAfterEachStep — free):\n${lines.join('\n')}`;
+      }
 
       content.push({ type: 'text', text: summary });
       return { content };
