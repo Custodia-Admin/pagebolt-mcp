@@ -158,7 +158,9 @@ Create Open Graph / social preview images.
 
 Execute multi-step browser automation.
 
-**Actions:** `navigate`, `click`, `fill`, `select`, `hover`, `scroll`, `wait`, `wait_for`, `evaluate`, `screenshot`, `pdf`
+**Actions:** `navigate`, `click`, `dblclick`, `fill`, `select`, `hover`, `scroll`, `wait`, `wait_for`, `evaluate`, `press_key`, `screenshot`, `pdf`, `diff`
+
+**`observeAfterEachStep`** (optional, **free**): attaches a compact state snapshot (page type + top interactive elements + suggested actions, no screenshot) to each step result, so an agent can confirm what's on screen — e.g. that a dropdown opened — and pick the right selector for its next call without blind-batching.
 
 **Example prompts:**
 - "Go to https://example.com, click the pricing link, then screenshot both pages"
@@ -323,6 +325,12 @@ Record a professional demo video. The agent inspects the page first to discover 
 Inspect a page and get a structured analysis of its elements, forms, links, headings, and potential issues.
 
 **Arguments:** `url` (required)
+
+### `/capture-authenticated`
+
+Capture a page behind a login using the [auth.md](https://workos.com/auth.md) discovery pattern: find the target's auth metadata, obtain a credential on the user's behalf, then hand it to PageBolt via `authorization`/`cookies`/`headers`. Includes a built-in reality check — auth.md grants **API tokens, not browser session cookies**, so cookie-session web apps still need a real session cookie (which the prompt guides the agent to request).
+
+**Arguments:** `url` (required), `capture` (`observe`|`screenshot`), `credential`, `credential_type` (`bearer`|`cookie`|`header`)
 
 ---
 
