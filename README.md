@@ -181,6 +181,28 @@ Inspect a web page and get a structured map of all interactive elements, heading
 
 **Tip:** Use `inspect_page` before `run_sequence` to discover reliable CSS selectors instead of guessing.
 
+### `act_on_page`
+
+Goal-driven automation. Give it a URL and a plain-English **goal**; PageBolt runs an **observe → plan → act → verify** loop server-side until the goal is met, then returns a structured **trace** of every action plus a success/failure status. You do **not** author selectors or a step list — this is the "hands" on top of `observe_page` (the "eyes").
+
+**Key parameters:**
+- `url` — the page to start on (required)
+- `goal` — plain-English outcome you want, e.g. "Log in and open the billing page" (required)
+- `maxSteps` — cap on planning iterations (default 8; clamped to your plan ceiling)
+- `allowedDomains` — hosts the agent may navigate to (defaults to the start host only)
+- `credentials` — `{ username, password }`, substituted at execution time only, **never logged or sent to the planner LLM**; shown in the trace as `<redacted>`
+- `session_id` — run inside an existing session to reuse cookies/login
+
+**When to use which:** use `act_on_page` when you only know the *outcome*; use `run_sequence` when you already know the exact deterministic steps/selectors (cheaper).
+
+**Plan & cost:** Starter+ only. Metered: **2 requests base + 1 per step taken** (a 4-step run costs 6 requests).
+
+**Example prompts:**
+- "On https://app.example.com/login, log in with these credentials and open the billing page"
+- "Go to https://example.com and accept the cookie banner, then start a free trial"
+
+**Tip:** Scope `allowedDomains` tightly and avoid pointing it at destructive flows — the agent treats page text as untrusted and pursues only your goal.
+
 ### `record_video`
 
 Record a professional demo video of a multi-step browser automation sequence with cursor effects, click animations, smooth movement, and optional AI voice narration.
