@@ -170,11 +170,14 @@ Execute multi-step browser automation.
 
 Inspect a web page and get a structured map of all interactive elements, headings, forms, links, and images — each with a unique CSS selector.
 
-**Key parameters:** `url`/`html`, `width`, `height`, `viewportDevice`, `darkMode`, `cookies`, `headers`, `authorization`, `blockBanners`, `blockAds`, `waitUntil`, `waitForSelector`
+**Key parameters:** `url`/`html`, `width`, `height`, `viewportDevice`, `darkMode`, `cookies`, `headers`, `authorization`, `blockBanners`, `blockAds`, `waitUntil`, `waitForSelector`, `includeConsole`
+
+**`includeConsole`** (optional, opt-in): also capture the page's browser console output (`console.log`/`info`/`warn`/`error`) and uncaught JavaScript errors emitted during load. Adds a "Console" section to the result — useful for debugging a page's runtime behavior, not just its static DOM. Also available on `observe_page`.
 
 **Example prompts:**
 - "Inspect https://example.com and tell me what buttons and forms are on the page"
 - "What interactive elements are on the login page? I need selectors for a sequence"
+- "Inspect https://example.com with includeConsole and show me any console errors"
 
 **Tip:** Use `inspect_page` before `run_sequence` to discover reliable CSS selectors instead of guessing.
 
