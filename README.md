@@ -251,7 +251,7 @@ Record a professional demo video of a multi-step browser automation sequence wit
 - `audioGuide` — AI voice narration: `{ enabled: true, script: "Intro. {{1}} Step one. {{2}} Step two. Outro." }`
 - `darkMode` — emulate dark color scheme in the browser (recommended for light-background sites)
 - `blockBanners` — hide cookie consent popups (use on almost every recording)
-- `async` — render via an async job and poll to completion (default: **true**). Long recordings are enqueued (`202 { job_id }`) and this tool waits for the hosted result, so they don't hit MCP client / API request timeouts. Set `false` to force a single blocking synchronous request that returns the video inline. Falls back to sync automatically if async is unavailable. **Quota is charged only on success; max 5 pending jobs per account.**
+- `async` — render via an async job and poll to completion. Long recordings are enqueued (`202 { job_id }`) and this tool waits for the result, so they don't hit MCP client / API request timeouts. The async result is a **private hosted video URL** (its bytes can't be pulled back via the API key). Set `false` to force a single blocking synchronous request that returns the video **inline** (base64 embedded + saved to `saveTo`). **Default: `true`, except when you pass `saveTo`** (then the synchronous path is used so the file is actually produced on disk). Falls back to sync automatically if async is unavailable. **Quota is charged only on success; max 5 pending jobs per account.**
 - `pollTimeoutMs` — max time to wait for an async job (default: 240000 ≈ 4 min). If the render is still running when this elapses, the `job_id` is returned so you can check it later with `get_job`.
 - `saveTo` — output file path
 
