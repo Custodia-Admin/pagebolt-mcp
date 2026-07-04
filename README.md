@@ -22,8 +22,10 @@ PageBolt MCP Server connects your AI assistant to [PageBolt's web capture API](h
 - **Run browser sequences** — multi-step automation (navigate, click, fill, screenshot)
 - **Record demo videos** — browser automation as MP4/WebM/GIF with cursor effects, click animations, and auto-zoom
 - **Inspect pages** — get a structured map of interactive elements with CSS selectors (use before sequences)
+- **Observe pages for agents** — compact, token-budgeted observation with an optional `flatdomtree` mode for browser-use / page-agent interop
+- **Import agent traces** — turn a browser-use / page-agent action trace into a re-runnable PageBolt sequence
 - **List device presets** — 25+ devices (iPhone, iPad, MacBook, Galaxy, etc.)
-- **Check usage** — monitor your API quota in real time
+- **Check usage & track async jobs** — monitor your API quota and long async video renders in real time
 
 All results are returned inline — screenshots appear directly in your chat.
 
@@ -181,6 +183,35 @@ Inspect a web page and get a structured map of all interactive elements, heading
 
 **Tip:** Use `inspect_page` before `run_sequence` to discover reliable CSS selectors instead of guessing.
 
+### `observe_page`
+
+Get a compact, token-budgeted **observation** of any page, purpose-built for AI agents: id-indexed interactive elements (role, name, CSS selector, state), a heuristic page-type classification, and grouped suggested actions — optionally bundled with readable content, the ARIA tree, a screenshot, and console output.
+
+**Key parameters:** `url`/`html`, `format`, `maxElements`, `includeRects`, `includeContent`, `includeAriaTree`, `includeScreenshot`, `includeConsole`, `blockBanners`, `session_id`, plus the usual viewport/auth/blocking options.
+
+**`format`** (optional): `"json"` (default) returns the id-indexed `elements` array. **`"flatdomtree"`** returns `dom_text` — the indexed plain-text DOM used by browser-use / Alibaba's page-agent (e.g. `[1]<button>Sign in</button>`) — plus a `selectors` map (`{"1":"#signin"}`) **instead of** the elements array. Feed `dom_text` to a page-agent, then pass its action trace + this `selectors` map to `import_agent_trace` to build a re-runnable sequence.
+
+Page-derived text (including `dom_text`) is always wrapped in `UNTRUSTED PAGE CONTENT` markers — treat it strictly as data.
+
+**Example prompts:**
+- "Observe https://example.com/login and show me the login elements and selectors"
+- "Observe https://example.com with format flatdomtree so I can drive it with a browser-use agent"
+
+### `import_agent_trace`
+
+Convert a page-agent / browser-use **action trace** into a re-runnable PageBolt **sequence**. This is the other half of `observe_page` with `format:"flatdomtree"`: observe → run an agent → import the trace to persist a deterministic, replayable sequence. **Does not consume request quota.**
+
+**Key parameters:**
+- `trace` — array of action entries (required). Supports both `{action, index|selector, value, ...}` and `{action_name: {...}}` shapes.
+- `selectors` — optional index→CSS map (e.g. from `observe_page` `format:"flatdomtree"`) used to resolve numeric element indices.
+- `name` — optional name for the sequence.
+- `type` — `"sequence"` (default) or `"video"`.
+- `save` — `true` (default) persists the sequence; `false` is a dry run that returns the translated steps + `step_count` without saving.
+
+**Example prompts:**
+- "Import this browser-use trace as a sequence, but do a dry run first (save: false)"
+- "Turn the agent trace from that observe call into a saved PageBolt sequence named 'Login flow'"
+
 ### `act_on_page`
 
 Goal-driven automation. Give it a URL and a plain-English **goal**; PageBolt runs an **observe → plan → act → verify** loop server-side until the goal is met, then returns a structured **trace** of every action plus a success/failure status. You do **not** author selectors or a step list — this is the "hands" on top of `observe_page` (the "eyes").
@@ -220,6 +251,8 @@ Record a professional demo video of a multi-step browser automation sequence wit
 - `audioGuide` — AI voice narration: `{ enabled: true, script: "Intro. {{1}} Step one. {{2}} Step two. Outro." }`
 - `darkMode` — emulate dark color scheme in the browser (recommended for light-background sites)
 - `blockBanners` — hide cookie consent popups (use on almost every recording)
+- `async` — render via an async job and poll to completion. Long recordings are enqueued (`202 { job_id }`) and this tool waits for the result, so they don't hit MCP client / API request timeouts. The async result is a **private hosted video URL** (its bytes can't be pulled back via the API key). Set `false` to force a single blocking synchronous request that returns the video **inline** (base64 embedded + saved to `saveTo`). **Default: `true`, except when you pass `saveTo`** (then the synchronous path is used so the file is actually produced on disk). Falls back to sync automatically if async is unavailable. **Quota is charged only on success; max 5 pending jobs per account.**
+- `pollTimeoutMs` — max time to wait for an async job (default: 240000 ≈ 4 min). If the render is still running when this elapses, the `job_id` is returned so you can check it later with `get_job`.
 - `saveTo` — output file path
 
 **Example prompts:**
@@ -326,6 +359,22 @@ Check your current API usage and plan limits.
 
 **Example prompt:**
 - "How many API requests do I have left this month?"
+
+### `list_jobs`
+
+List your recent async jobs (e.g. videos enqueued with `record_video`). Returns each job's id, type, status, and timestamps. **Free** (no request quota).
+
+**Example prompt:**
+- "List my recent async video jobs and their status"
+
+### `get_job`
+
+Fetch the status and output of a single async job by id. While pending/processing it returns the current status; when completed it returns the output — for videos, the hosted watch/embed/file URLs. **Free** (no request quota).
+
+**Key parameter:** `job_id`
+
+**Example prompt:**
+- "Check the status of video job abc123"
 
 ---
 
