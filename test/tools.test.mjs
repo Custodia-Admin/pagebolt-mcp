@@ -313,6 +313,7 @@ test('record_video async enqueues, polls, downloads, and embeds the hosted video
           name: 'record_video',
           arguments: {
             steps: [{ action: 'navigate', url: 'https://example.com' }],
+            async: true,
             saveTo: out,
           },
         });
@@ -397,11 +398,77 @@ test('record_video falls back to sync when async enqueue fails', async () => {
           name: 'record_video',
           arguments: {
             steps: [{ action: 'navigate', url: 'https://example.com' }],
+            async: true,
             saveTo: out,
           },
         });
         const resource = (res.content || []).find((c) => c.type === 'resource');
         assert.ok(resource, 'fallback should still deliver the video inline');
+        assert.equal(resource.resource.blob, base64);
+      },
+    );
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('record_video defaults to async (hosted URL) when no saveTo is given', async () => {
+  await withClient(
+    (url, method, body) => {
+      if (url.endsWith('/api/v1/video') && method === 'POST') {
+        assert.equal(body.async, true, 'no-saveTo default must enqueue async');
+        return jsonResponse({ job_id: 'job_x', status: 'queued', status_url: '/api/v1/jobs/job_x' }, { status: 202 });
+      }
+      if (url.endsWith('/api/v1/jobs/job_x') && method === 'GET') {
+        return jsonResponse({
+          id: 'job_x',
+          type: 'video',
+          status: 'completed',
+          output: {
+            format: 'mp4',
+            duration_ms: 20000,
+            url: 'https://pagebolt.dev/v/job_x',
+            file_url: 'https://pagebolt.dev/v/job_x/file',
+            visibility: 'private',
+          },
+        });
+      }
+      throw new Error(`unexpected request ${method} ${url}`);
+    },
+    async (client) => {
+      const res = await client.callTool({
+        name: 'record_video',
+        arguments: { steps: [{ action: 'navigate', url: 'https://example.com' }] },
+      });
+      // No saveTo → no download attempt → hosted-URL text only, no embedded resource.
+      const resource = (res.content || []).find((c) => c.type === 'resource');
+      assert.equal(resource, undefined, 'private hosted video should not be downloaded/embedded');
+      const text = textOf(res);
+      assert.match(text, /Video recorded successfully \(hosted\)/);
+      assert.match(text, /Watch:\s+https:\/\/pagebolt\.dev\/v\/job_x/);
+    },
+  );
+});
+
+test('record_video defaults to sync (inline file) when saveTo is provided', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'pagebolt-'));
+  const out = join(tmp, 'rec.mp4');
+  const base64 = Buffer.from('SAVED-VIDEO').toString('base64');
+  try {
+    await withClient(
+      (url, method, body) => {
+        assert.ok(url.endsWith('/api/v1/video') && method === 'POST');
+        assert.notEqual(body.async, true, 'saveTo default must use the synchronous path');
+        assert.equal(body.response_type, 'json');
+        return jsonResponse({ data: base64, format: 'mp4', size_bytes: 11, duration_ms: 4000, usage: { video_cost: 3, remaining: 50 } });
+      },
+      async (client) => {
+        const res = await client.callTool({
+          name: 'record_video',
+          arguments: { steps: [{ action: 'navigate', url: 'https://example.com' }], saveTo: out },
+        });
+        const resource = (res.content || []).find((c) => c.type === 'resource');
+        assert.ok(resource, 'saveTo default should deliver the video inline');
         assert.equal(resource.resource.blob, base64);
       },
     );

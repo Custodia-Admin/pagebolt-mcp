@@ -238,7 +238,7 @@ If you are driving a browser-use / Alibaba page-agent style loop, call observe_p
 
 ## Long videos: async jobs (record_video, list_jobs, get_job)
 
-record_video renders as an async job by default: it enqueues the video (max 5 pending jobs/account) and polls until completion, so long recordings do not hit MCP client / API request timeouts. Quota is charged only on success. The finished video is delivered as a hosted URL (and downloaded + embedded when possible). If polling exceeds the timeout, record_video returns a job_id you can check later with get_job. Use list_jobs to see recent jobs. Set async:false on record_video to force a single blocking synchronous request that returns the video inline (best for short clips).
+record_video can render as an async job: it enqueues the video (max 5 pending jobs/account) and polls until completion, so long recordings do not hit MCP client / API request timeouts. Quota is charged only on success. The async result is a private hosted video URL (its bytes can't be pulled back via the API key). If polling exceeds the timeout, record_video returns a job_id you can check later with get_job. Use list_jobs to see recent jobs. The async param defaults to true EXCEPT when you pass saveTo — then the synchronous path is used so the actual video file is embedded and written to disk (best for short clips you want to keep). Set async:false explicitly to always get the inline video, or async:true to always enqueue a job.
 
 ## Goal-driven automation: act_on_page vs run_sequence
 
@@ -858,7 +858,7 @@ server.tool(
       script: z.string().max(5000).optional().describe('Script mode: a single narration script with {{N}} step markers (0-indexed) for synchronized narration. Steps execute when narration reaches each marker. When provided, per-step "narration" fields are ignored.'),
     }).optional().describe('Audio Guide TTS settings. Two modes: (1) Per-step — add "narration" to individual steps. (2) Script — provide "script" with {{N}} markers for continuous narration synchronized to steps.'),
     variables: z.record(z.string()).optional().describe('Key-value map for variable substitution in step URLs/values. E.g. { "base_url": "https://example.com" } replaces {{base_url}} in steps.'),
-    async: z.boolean().optional().describe('Render via an async job for reliability (default: true). The video is enqueued (202 + job_id) and this tool polls until it finishes, so long recordings do not hit the API\'s per-request timeout. The finished video is delivered as a hosted URL (and downloaded/embedded when possible). Set false to force a single blocking synchronous request that returns the video inline. If async is unavailable on your plan, it automatically falls back to sync. Quota is charged only on success; max 5 pending jobs per account.'),
+    async: z.boolean().optional().describe('Render via an async job for reliability. The video is enqueued (202 + job_id) and this tool polls until it finishes, so long recordings do not hit the API\'s per-request timeout. The finished video is delivered as a private hosted URL (its bytes cannot be pulled back via the API key). Set false to force a single blocking synchronous request that returns the video INLINE (base64 embedded + saved to saveTo). DEFAULT: true, except when you pass saveTo (then sync is used so the file is actually produced on disk). If async is unavailable on your plan, it automatically falls back to sync. Quota is charged only on success; max 5 pending jobs per account.'),
     pollTimeoutMs: z.number().int().min(10_000).max(600_000).optional().describe('Max time to wait for an async video job to finish, in milliseconds (default: 240000 = 4 min). If the job is still running when this elapses, the job_id is returned so you can check it later with get_job.'),
     saveTo: z.string().optional().describe('Output file path (default: ./recording.mp4)'),
   },
@@ -871,7 +871,13 @@ server.tool(
     const format = params.format || 'mp4';
     const ext = format === 'gif' ? 'gif' : format;
     const mimeType = videoMimeType(ext);
-    const useAsync = asyncOpt !== false; // default: async on for reliability
+    // Default async ON for reliability, EXCEPT when the caller explicitly wants
+    // the file on disk (saveTo). Async delivers a private hosted video whose
+    // bytes cannot be pulled back via the API key, so an explicit saveTo request
+    // uses the synchronous path (which returns base64) to actually save/embed
+    // the video. An explicit `async` value always wins.
+    const wantsLocalFile = saveTo != null;
+    const useAsync = asyncOpt === undefined ? !wantsLocalFile : asyncOpt !== false;
 
     // Best-effort save-to-disk + embedded-resource for a base64 video payload.
     const deliverInline = (data, extra = '') => {
@@ -979,26 +985,30 @@ server.tool(
       }
 
       const output = job.output || {};
-      // Try to download the hosted video so we can still embed + save it locally.
-      let inlineData = null;
-      if (output.file_url) {
-        try {
-          const fileRes = await fetch(output.file_url, { headers: { 'x-api-key': API_KEY } });
-          if (fileRes.ok) {
-            const buf = Buffer.from(await fileRes.arrayBuffer());
-            inlineData = buf.toString('base64');
-          }
-        } catch (_dlErr) {
-          // Download failed — we still return the hosted URLs below.
-        }
-      }
-
       const urlLines =
         (output.url ? `  Watch:    ${output.url}\n` : '') +
         (output.embed_url ? `  Embed:    ${output.embed_url}\n` : '') +
         (output.file_url ? `  File URL: ${output.file_url}\n` : '') +
         (output.visibility ? `  Visibility: ${output.visibility}\n` : '') +
         (output.expires_at ? `  Expires:  ${output.expires_at}\n` : '');
+
+      // Only bother fetching the bytes when the caller asked to save a local
+      // file. Private hosted videos (the default) can't be pulled via the API
+      // key, so this succeeds only for retrievable files.
+      let inlineData = null;
+      let downloadFailed = false;
+      if (wantsLocalFile && output.file_url) {
+        try {
+          const fileRes = await fetch(output.file_url, { headers: { 'x-api-key': API_KEY } });
+          if (fileRes.ok) {
+            inlineData = Buffer.from(await fileRes.arrayBuffer()).toString('base64');
+          } else {
+            downloadFailed = true;
+          }
+        } catch (_dlErr) {
+          downloadFailed = true;
+        }
+      }
 
       if (inlineData) {
         return deliverInline(
@@ -1007,8 +1017,12 @@ server.tool(
         );
       }
 
-      // Could not download bytes — return the hosted URLs (still fully usable).
+      // No bytes to embed — return the hosted URLs (fully usable on their own).
       const durationSec = output.duration_ms != null ? (output.duration_ms / 1000).toFixed(1) : '?';
+      const hint = downloadFailed
+        ? `\nNote: the hosted video is private, so it could not be downloaded to "${saveTo}". ` +
+          `Open it at the URL above, or call record_video again with async: false to get the video file inline / saved to disk.`
+        : '';
       return {
         content: [{
           type: 'text',
@@ -1019,7 +1033,7 @@ server.tool(
             `  Duration: ${durationSec}s\n` +
             (output.frames != null ? `  Frames:   ${output.frames}\n` : '') +
             (output.steps_completed != null ? `  Steps:    ${output.steps_completed}/${output.total_steps} completed\n` : '') +
-            urlLines,
+            urlLines + hint,
         }],
       };
     } catch (err) {
