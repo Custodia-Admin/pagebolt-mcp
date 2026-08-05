@@ -5,6 +5,16 @@ All notable changes to the PageBolt MCP server are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.16.1]
+
+### Improved
+
+- **Clearer API error messages** — tool failures now surface PageBolt's structured
+  `error`, `code`, and `hint` fields (e.g. `target_connection_timeout`,
+  `request_timeout`) instead of opaque HTTP status text. Agents can tell when the
+  *target site* timed out vs a PageBolt issue. Client request timeout message
+  also notes that the external site may be slow.
+
 ## [1.16.0]
 
 ### Added

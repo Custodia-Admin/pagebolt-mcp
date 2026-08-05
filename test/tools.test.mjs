@@ -450,6 +450,27 @@ test('record_video defaults to async (hosted URL) when no saveTo is given', asyn
   );
 });
 
+test('observe_page surfaces structured API error code and hint', async () => {
+  await withClient(
+    () => jsonResponse({
+      error: 'Could not connect to the target site (https://example.gov). The server did not respond.',
+      code: 'target_connection_timeout',
+      hint: 'Confirm the site loads in a normal browser from a public network.',
+    }, { status: 504 }),
+    async (client) => {
+      const res = await client.callTool({
+        name: 'observe_page',
+        arguments: { url: 'https://example.gov' },
+      });
+      assert.equal(res.isError, true);
+      const text = textOf(res);
+      assert.match(text, /target_connection_timeout/);
+      assert.match(text, /Confirm the site loads/);
+      assert.match(text, /\(504\)/);
+    },
+  );
+});
+
 test('record_video defaults to sync (inline file) when saveTo is provided', async () => {
   const tmp = mkdtempSync(join(tmpdir(), 'pagebolt-'));
   const out = join(tmp, 'rec.mp4');

@@ -61,7 +61,7 @@ async function callApi(endpoint, options = {}) {
   const method = options.method || 'GET';
   const headers = {
     'x-api-key': API_KEY,
-    'user-agent': 'pagebolt-mcp/1.16.0',
+    'user-agent': 'pagebolt-mcp/1.16.1',
     ...(options.body ? { 'Content-Type': 'application/json' } : {}),
   };
   const body = options.body ? JSON.stringify(options.body) : undefined;
@@ -88,14 +88,17 @@ async function callApi(endpoint, options = {}) {
       try {
         const errJson = await res.json();
         errorMsg = errJson.error || JSON.stringify(errJson);
+        // Surface structured fields from PageBolt's clearer browser errors
+        if (errJson.code) errorMsg += ` [${errJson.code}]`;
+        if (errJson.hint) errorMsg += ` Hint: ${errJson.hint}`;
       } catch {
         errorMsg = `HTTP ${res.status} ${res.statusText}`;
       }
-      throw new Error(`PageBolt API error: ${errorMsg}`);
+      throw new Error(`PageBolt API error (${res.status}): ${errorMsg}`);
     } catch (err) {
       clearTimeout(timer);
       if (err.name === 'AbortError') {
-        throw new Error(`PageBolt API error: request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
+        throw new Error(`PageBolt API error: request timed out after ${REQUEST_TIMEOUT_MS / 1000}s. The target site may be slow or unresponsive.`);
       }
       lastError = err;
       if (attempt < MAX_RETRIES && !err.message.startsWith('PageBolt API error:')) {
