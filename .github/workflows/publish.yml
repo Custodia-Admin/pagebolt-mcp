@@ -1,0 +1,39 @@
+# Publish pagebolt-mcp to npm via Trusted Publishing (OIDC).
+# No NPM_TOKEN secret required — configure the Trusted Publisher on npmjs.com first:
+#   Package → Settings → Trusted Publisher → GitHub Actions
+#   Org: Custodia-Admin
+#   Repo: pagebolt-mcp
+#   Workflow filename: publish.yml
+name: Publish to npm
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # required for npm Trusted Publishing (OIDC)
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Ensure npm supports Trusted Publishing
+        run: npm install -g npm@latest
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Publish
+        run: npm publish --access public --provenance
