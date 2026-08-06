@@ -1,0 +1,17 @@
+node_modules
+.git
+.github
+.smithery
+.cursor
+*.md
+!README.md
+!LICENSE
+test
+scripts
+recording.mp4
+.env
+.env.*
+.mcpregistry_*
+.npmrc
+*.log
+.DS_Store

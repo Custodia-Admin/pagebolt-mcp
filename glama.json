@@ -1,0 +1,8 @@
+{
+  "$schema": "https://glama.ai/mcp/schemas/server.json",
+  "maintainers": ["Custodia-Admin"],
+  "name": "PageBolt MCP Server",
+  "description": "MCP server for PageBolt — take screenshots, generate PDFs, create OG images, inspect pages, and record narrated demo videos from Claude, Cursor, and other MCP clients.",
+  "license": "MIT",
+  "homepage": "https://pagebolt.dev"
+}
