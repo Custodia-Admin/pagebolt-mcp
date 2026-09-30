@@ -497,3 +497,161 @@ test('record_video defaults to sync (inline file) when saveTo is provided', asyn
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+// ── Authenticated capture: cookies + authState must reach the API intact ──
+const AUTH_COOKIE = {
+  name: 'sid', value: 'abc123', domain: '.app.example.com', path: '/',
+  secure: true, httpOnly: true, sameSite: 'Lax', expires: 1990000000,
+};
+const AUTH_STATE = {
+  cookies: [AUTH_COOKIE],
+  localStorage: [{ origin: 'https://app.example.com', items: [{ name: 'token', value: 't0k' }] }],
+};
+
+test('record_video forwards full cookies and authState to /api/v1/video', async () => {
+  let seen;
+  await withClient(
+    (url, method, body) => {
+      if (url.endsWith('/api/v1/video') && method === 'POST') {
+        seen = body;
+        return jsonResponse({ data: Buffer.from('v').toString('base64'), format: 'mp4', duration_ms: 1000, steps_completed: 1, total_steps: 1 });
+      }
+      throw new Error(`unexpected request ${method} ${url}`);
+    },
+    async (client) => {
+      const res = await client.callTool({
+        name: 'record_video',
+        arguments: {
+          steps: [{ action: 'navigate', url: 'https://app.example.com/dash' }],
+          async: false,
+          saveTo: join(tmpdir(), 'pagebolt-auth-test.mp4'),
+          cookies: [AUTH_COOKIE, 'plain=1'],
+          authState: AUTH_STATE,
+        },
+      });
+      assert.ok(!res.isError, textOf(res));
+    },
+  );
+  assert.deepEqual(seen.cookies, [AUTH_COOKIE, 'plain=1'], 'cookies (with path/secure/httpOnly/sameSite/expires) must not be stripped');
+  assert.deepEqual(seen.authState, AUTH_STATE);
+});
+
+test('run_sequence forwards full cookies and authState to /api/v1/sequence', async () => {
+  let seen;
+  await withClient(
+    (url, method, body) => {
+      if (url.endsWith('/api/v1/sequence') && method === 'POST') {
+        seen = body;
+        return jsonResponse({ outputs: [], steps_completed: 2, total_steps: 2 });
+      }
+      throw new Error(`unexpected request ${method} ${url}`);
+    },
+    async (client) => {
+      await client.callTool({
+        name: 'run_sequence',
+        arguments: {
+          steps: [{ action: 'navigate', url: 'https://app.example.com/' }, { action: 'screenshot', name: 's' }],
+          cookies: [AUTH_COOKIE],
+          authState: AUTH_STATE,
+        },
+      });
+    },
+  );
+  assert.deepEqual(seen.cookies, [AUTH_COOKIE]);
+  assert.deepEqual(seen.authState, AUTH_STATE);
+});
+
+test('run_sequence accepts more than 20 steps (limit is enforced per-plan by the server)', async () => {
+  let seen;
+  await withClient(
+    (url, method, body) => {
+      if (url.endsWith('/api/v1/sequence') && method === 'POST') { seen = body; return jsonResponse({ outputs: [], step_results: [], steps_completed: 30, total_steps: 30, total_duration_ms: 1, usage: { outputs_charged: 1, remaining: 99 } }); }
+      throw new Error(`unexpected request ${method} ${url}`);
+    },
+    async (client) => {
+      const steps = Array.from({ length: 29 }, (_, i) => ({ action: 'navigate', url: `https://example.com/${i}` }));
+      steps.push({ action: 'screenshot', name: 's' });
+      const res = await client.callTool({ name: 'run_sequence', arguments: { steps } });
+      assert.ok(!res.isError, textOf(res));
+    },
+  );
+  assert.equal(seen.steps.length, 30);
+});
+
+test('record_video accepts highlight steps and forwards style/color/duration/label', async () => {
+  let seen;
+  await withClient(
+    (url, method, body) => {
+      if (url.endsWith('/api/v1/video') && method === 'POST') {
+        seen = body;
+        return jsonResponse({ data: Buffer.from('v').toString('base64'), format: 'mp4', duration_ms: 1000, steps_completed: 2, total_steps: 2 });
+      }
+      throw new Error(`unexpected request ${method} ${url}`);
+    },
+    async (client) => {
+      const res = await client.callTool({
+        name: 'record_video',
+        arguments: {
+          async: false,
+          saveTo: join(tmpdir(), 'pagebolt-hl-test.mp4'),
+          steps: [
+            { action: 'navigate', url: 'https://example.com' },
+            { action: 'highlight', selector: '#cta', style: 'spotlight', color: '#ff0066', duration: 3000, label: 'Start here' },
+          ],
+        },
+      });
+      assert.ok(!res.isError, textOf(res));
+    },
+  );
+  assert.deepEqual(seen.steps[1], { action: 'highlight', selector: '#cta', style: 'spotlight', color: '#ff0066', duration: 3000, label: 'Start here' });
+});
+
+test('export_sequence returns importable JSON (nothing saved, no HTTP call) and validates steps', async () => {
+  let calls = 0;
+  await withClient(async () => { calls++; return jsonResponse({}); }, async (client) => {
+    const res = await client.callTool({
+      name: 'export_sequence',
+      arguments: {
+        name: 'Demo',
+        steps: [
+          { action: 'navigate', url: 'https://example.com' },
+          { action: 'highlight', selector: 'h1', note: 'Headline', narration: 'This is the headline.' },
+        ],
+        pace: 1.2,
+        audioGuide: { enabled: true, pacing: 'overlap' },
+      },
+    });
+    assert.notEqual(res.isError, true);
+    const text = res.content[0].text;
+    const json = JSON.parse(text.slice(text.indexOf('```json') + 7, text.indexOf('```', text.indexOf('```json') + 7)));
+    assert.equal(json.steps.length, 2);
+    assert.equal(json.pace, 1.2);
+    assert.equal(json.audioGuide.pacing, 'overlap');
+    assert.match(text, /Import JSON/);
+    assert.equal(calls, 0, 'export must not hit the API unless save:true');
+  });
+});
+
+test('export_sequence rejects unknown actions and steps without required fields', async () => {
+  await withClient(async () => jsonResponse({}), async (client) => {
+    const bad = await client.callTool({ name: 'export_sequence', arguments: { name: 'x', steps: [{ action: 'teleport' }] } });
+    assert.equal(bad.isError, true);
+    const noSel = await client.callTool({ name: 'export_sequence', arguments: { name: 'x', steps: [{ action: 'click' }] } });
+    assert.equal(noSel.isError, true);
+    assert.match(noSel.content[0].text, /step 1.*selector/i);
+  });
+});
+
+test('export_sequence save:true stores it in the library via /api/v1/sequences', async () => {
+  let seen;
+  await withClient(async (url, method, body) => {
+    if (url.endsWith('/api/v1/sequences') && method === 'POST') { seen = body; return jsonResponse({ id: 'seq_1', name: body.name }, { status: 201 }); }
+    return jsonResponse({});
+  }, async (client) => {
+    const res = await client.callTool({ name: 'export_sequence', arguments: { name: 'Saved one', type: 'video', save: true, steps: [{ action: 'navigate', url: 'https://example.com' }] } });
+    assert.notEqual(res.isError, true);
+    assert.match(res.content[0].text, /seq_1/);
+    assert.equal(seen.type, 'video');
+    assert.equal(seen.name, 'Saved one');
+  });
+});
