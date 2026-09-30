@@ -497,3 +497,66 @@ test('record_video defaults to sync (inline file) when saveTo is provided', asyn
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+// ── Authenticated capture: cookies + authState must reach the API intact ──
+const AUTH_COOKIE = {
+  name: 'sid', value: 'abc123', domain: '.app.example.com', path: '/',
+  secure: true, httpOnly: true, sameSite: 'Lax', expires: 1990000000,
+};
+const AUTH_STATE = {
+  cookies: [AUTH_COOKIE],
+  localStorage: [{ origin: 'https://app.example.com', items: [{ name: 'token', value: 't0k' }] }],
+};
+
+test('record_video forwards full cookies and authState to /api/v1/video', async () => {
+  let seen;
+  await withClient(
+    (url, method, body) => {
+      if (url.endsWith('/api/v1/video') && method === 'POST') {
+        seen = body;
+        return jsonResponse({ data: Buffer.from('v').toString('base64'), format: 'mp4', duration_ms: 1000, steps_completed: 1, total_steps: 1 });
+      }
+      throw new Error(`unexpected request ${method} ${url}`);
+    },
+    async (client) => {
+      const res = await client.callTool({
+        name: 'record_video',
+        arguments: {
+          steps: [{ action: 'navigate', url: 'https://app.example.com/dash' }],
+          async: false,
+          saveTo: join(tmpdir(), 'pagebolt-auth-test.mp4'),
+          cookies: [AUTH_COOKIE, 'plain=1'],
+          authState: AUTH_STATE,
+        },
+      });
+      assert.ok(!res.isError, textOf(res));
+    },
+  );
+  assert.deepEqual(seen.cookies, [AUTH_COOKIE, 'plain=1'], 'cookies (with path/secure/httpOnly/sameSite/expires) must not be stripped');
+  assert.deepEqual(seen.authState, AUTH_STATE);
+});
+
+test('run_sequence forwards full cookies and authState to /api/v1/sequence', async () => {
+  let seen;
+  await withClient(
+    (url, method, body) => {
+      if (url.endsWith('/api/v1/sequence') && method === 'POST') {
+        seen = body;
+        return jsonResponse({ outputs: [], steps_completed: 2, total_steps: 2 });
+      }
+      throw new Error(`unexpected request ${method} ${url}`);
+    },
+    async (client) => {
+      await client.callTool({
+        name: 'run_sequence',
+        arguments: {
+          steps: [{ action: 'navigate', url: 'https://app.example.com/' }, { action: 'screenshot', name: 's' }],
+          cookies: [AUTH_COOKIE],
+          authState: AUTH_STATE,
+        },
+      });
+    },
+  );
+  assert.deepEqual(seen.cookies, [AUTH_COOKIE]);
+  assert.deepEqual(seen.authState, AUTH_STATE);
+});

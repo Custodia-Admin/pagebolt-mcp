@@ -168,8 +168,24 @@ const cookieSchema = z.union([
     name: z.string(),
     value: z.string(),
     domain: z.string().optional(),
-  }),
+    url: z.string().optional(),
+    path: z.string().optional(),
+    secure: z.boolean().optional(),
+    httpOnly: z.boolean().optional(),
+    sameSite: z.enum(['Strict', 'Lax', 'None', 'strict', 'lax', 'no_restriction', 'unspecified']).optional(),
+    expires: z.number().optional(),
+    expirationDate: z.number().optional(),
+  }).passthrough(),
 ]);
+
+/** Authenticated capture state (cookies + localStorage) — same shape on video and sequence. */
+const authStateSchema = z.object({
+  cookies: z.array(cookieSchema).max(100).optional().describe('Session cookies (up to 100). Objects may include domain, path, secure, httpOnly, sameSite, expires. Chrome-extension exports (sameSite: no_restriction/lax/strict, expirationDate) are accepted as-is.'),
+  localStorage: z.array(z.object({
+    origin: z.string().describe('Origin the items belong to, e.g. "https://app.example.com"'),
+    items: z.array(z.object({ name: z.string(), value: z.string() })),
+  })).optional().describe('localStorage entries to set before the page loads (for token-in-localStorage apps)'),
+}).optional().describe('Authenticated recording/capture: cookies + localStorage injected BEFORE the first navigation, so protected pages (dashboards, admin panels) render logged-in. Prefer this over scripting a login flow. Values are never logged.');
 
 /** Screenshot style / theme options (frame, background, shadow, etc.) */
 const styleSchema = z.object({
@@ -663,6 +679,8 @@ server.tool(
     blockChats: z.boolean().optional().describe('Block live chat widgets'),
     blockTrackers: z.boolean().optional().describe('Block tracking scripts'),
     deviceScaleFactor: z.number().min(1).max(3).optional().describe('Device pixel ratio (default: 1)'),
+    cookies: z.array(cookieSchema).max(100).optional().describe('Cookies to set before navigation — "name=value" strings or full cookie objects (domain, path, secure, httpOnly, sameSite, expires). Up to 100. Domain defaults to the first navigate step\'s host.'),
+    authState: authStateSchema,
     session_id: z.string().optional().describe('Persistent session ID (Starter+ only). Reuse a live browser page created with create_session — browser state (cookies, localStorage, auth) carries over from previous requests in this session.'),
     observeAfterEachStep: z.boolean().optional().describe('FREE (no extra request charged). After every step, attach a compact, token-budgeted state snapshot — page type + the top interactive elements (id/role/name/selector) + suggested actions, NO screenshot. Use this when a step might open a dropdown/popover/modal or navigate: read the trace to confirm what is now on screen and pick the right selector for the NEXT call, instead of blind-batching. Hidden/off-screen elements are filtered out.'),
   },
@@ -847,6 +865,9 @@ server.tool(
     blockChats: z.boolean().optional().describe('Block live chat widgets'),
     blockTrackers: z.boolean().optional().describe('Block tracking scripts'),
     deviceScaleFactor: z.number().min(1).max(3).optional().describe('Device pixel ratio (default: 1)'),
+    // ── Authenticated recording ──
+    cookies: z.array(cookieSchema).max(100).optional().describe('Cookies to set before the first navigation — "name=value" strings or full cookie objects (domain, path, secure, httpOnly, sameSite, expires). Up to 100. Domain defaults to the first navigate step\'s host.'),
+    authState: authStateSchema,
     // ── Audio Guide ──
     audioGuide: z.object({
       enabled: z.boolean().optional().describe('Enable Audio Guide narration'),
