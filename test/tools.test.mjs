@@ -605,3 +605,53 @@ test('record_video accepts highlight steps and forwards style/color/duration/lab
   );
   assert.deepEqual(seen.steps[1], { action: 'highlight', selector: '#cta', style: 'spotlight', color: '#ff0066', duration: 3000, label: 'Start here' });
 });
+
+test('export_sequence returns importable JSON (nothing saved, no HTTP call) and validates steps', async () => {
+  let calls = 0;
+  await withClient(async () => { calls++; return jsonResponse({}); }, async (client) => {
+    const res = await client.callTool({
+      name: 'export_sequence',
+      arguments: {
+        name: 'Demo',
+        steps: [
+          { action: 'navigate', url: 'https://example.com' },
+          { action: 'highlight', selector: 'h1', note: 'Headline', narration: 'This is the headline.' },
+        ],
+        pace: 1.2,
+        audioGuide: { enabled: true, pacing: 'overlap' },
+      },
+    });
+    assert.notEqual(res.isError, true);
+    const text = res.content[0].text;
+    const json = JSON.parse(text.slice(text.indexOf('```json') + 7, text.indexOf('```', text.indexOf('```json') + 7)));
+    assert.equal(json.steps.length, 2);
+    assert.equal(json.pace, 1.2);
+    assert.equal(json.audioGuide.pacing, 'overlap');
+    assert.match(text, /Import JSON/);
+    assert.equal(calls, 0, 'export must not hit the API unless save:true');
+  });
+});
+
+test('export_sequence rejects unknown actions and steps without required fields', async () => {
+  await withClient(async () => jsonResponse({}), async (client) => {
+    const bad = await client.callTool({ name: 'export_sequence', arguments: { name: 'x', steps: [{ action: 'teleport' }] } });
+    assert.equal(bad.isError, true);
+    const noSel = await client.callTool({ name: 'export_sequence', arguments: { name: 'x', steps: [{ action: 'click' }] } });
+    assert.equal(noSel.isError, true);
+    assert.match(noSel.content[0].text, /step 1.*selector/i);
+  });
+});
+
+test('export_sequence save:true stores it in the library via /api/v1/sequences', async () => {
+  let seen;
+  await withClient(async (url, method, body) => {
+    if (url.endsWith('/api/v1/sequences') && method === 'POST') { seen = body; return jsonResponse({ id: 'seq_1', name: body.name }, { status: 201 }); }
+    return jsonResponse({});
+  }, async (client) => {
+    const res = await client.callTool({ name: 'export_sequence', arguments: { name: 'Saved one', type: 'video', save: true, steps: [{ action: 'navigate', url: 'https://example.com' }] } });
+    assert.notEqual(res.isError, true);
+    assert.match(res.content[0].text, /seq_1/);
+    assert.equal(seen.type, 'video');
+    assert.equal(seen.name, 'Saved one');
+  });
+});

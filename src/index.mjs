@@ -1379,6 +1379,85 @@ server.tool(
 // ═══════════════════════════════════════════════════════════════════
 // Tool: import_agent_trace — convert a page-agent/browser-use trace into a sequence
 // ═══════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// Tool: export_sequence — build a re-runnable sequence as importable JSON
+// ═══════════════════════════════════════════════════════════════
+const EXPORT_ACTIONS = ['navigate', 'click', 'dblclick', 'fill', 'select', 'hover', 'scroll', 'wait', 'wait_for', 'evaluate', 'press_key', 'highlight', 'screenshot', 'pdf'];
+const EXPORT_NEEDS = {
+  navigate: ['url'], click: ['selector'], dblclick: ['selector'], fill: ['selector', 'value'],
+  select: ['selector', 'value'], hover: ['selector'], wait_for: [], highlight: ['selector'], evaluate: ['script'],
+};
+
+server.tool(
+  'export_sequence',
+  'Turn a list of steps into a PageBolt sequence you (or the user) can edit and re-run: returns JSON to paste into the dashboard Sequence Builder ("Import JSON" - the same place "Edit sequence" opens), and it can optionally save it to the user\'s Saved Automations (save:true). Use it after you have planned a video/sequence so the user can tweak steps, highlights and narration themselves, or re-run it later with record_video / run_sequence. Does not run the sequence or consume quota. Put {{username}}/{{password}} placeholders in fill steps instead of real credentials; never include cookies.',
+  {
+    name: z.string().min(1).max(100).describe('Name for the sequence (used when saved).'),
+    steps: z.array(z.record(z.string(), z.any())).min(1).max(100).describe('Steps, same shape as record_video / run_sequence steps: {action, url|selector|value|key|ms|x|y|script|style|color|duration|note|narration|pauseAfter|optional}. Prefer scrolling by selector, never guessed pixel offsets.'),
+    type: z.enum(['sequence', 'video']).optional().describe('"video" if it will be recorded with record_video (default), "sequence" for run_sequence.'),
+    description: z.string().max(500).optional().describe('Optional description.'),
+    pace: z.number().min(0.5).max(3).optional().describe('Video pace multiplier (video only).'),
+    format: z.enum(['mp4', 'webm', 'gif']).optional().describe('Video format (video only).'),
+    viewport: z.object({ width: z.number().int(), height: z.number().int() }).optional().describe('Viewport size.'),
+    audioGuide: z.object({
+      enabled: z.boolean().optional(),
+      voice: z.string().optional(),
+      speed: z.number().optional(),
+      script: z.string().optional(),
+      pacing: z.enum(['overlap', 'sequential']).optional().describe('overlap (default): narration plays while the video continues; sequential: video waits for each narration to finish.'),
+    }).optional().describe('Narration settings (video only).'),
+    save: z.boolean().optional().describe('If true, also save it to the user\'s Saved Automations (appears in the dashboard and extension Library). Default false.'),
+  },
+  async (params) => {
+    const type = params.type || 'video';
+    const problems = [];
+    params.steps.forEach((st, i) => {
+      if (!st || !EXPORT_ACTIONS.includes(st.action)) {
+        problems.push(`step ${i + 1}: unknown action "${st && st.action}" (allowed: ${EXPORT_ACTIONS.join(', ')})`);
+        return;
+      }
+      for (const f of EXPORT_NEEDS[st.action] || []) {
+        if (st[f] === undefined || st[f] === '') problems.push(`step ${i + 1} (${st.action}): "${f}" is required`);
+      }
+      if (st.action === 'scroll' && !st.selector && st.y === undefined && st.x === undefined) {
+        problems.push(`step ${i + 1} (scroll): give a "selector" (preferred) or x/y`);
+      }
+      if (st.action === 'fill' && typeof st.value === 'string' && /password/i.test(st.selector || '') && !/^\{\{.*\}\}$/.test(st.value)) {
+        problems.push(`step ${i + 1} (fill): use a {{password}} placeholder instead of a literal password`);
+      }
+    });
+    if (problems.length) {
+      return { content: [{ type: 'text', text: `Cannot export - fix these steps first:\n- ${problems.join('\n- ')}` }], isError: true };
+    }
+
+    const payload = { steps: params.steps };
+    if (params.viewport) payload.viewport = params.viewport;
+    if (type === 'video') {
+      if (params.pace !== undefined) payload.pace = params.pace;
+      if (params.format) payload.format = params.format;
+      if (params.audioGuide) payload.audioGuide = params.audioGuide;
+    }
+
+    const lines = [];
+    if (params.save) {
+      try {
+        const res = await callApi('/api/v1/sequences', { method: 'POST', body: { name: params.name, description: params.description, type, ...payload } });
+        const data = await res.json();
+        lines.push(`Saved to Saved Automations as "${data.name || params.name}" (id ${data.id}). It now shows up in the dashboard Sequence Builder and the extension Library.`);
+      } catch (err) {
+        return { content: [{ type: 'text', text: `Save failed: ${err.message}` }], isError: true };
+      }
+    }
+    lines.push(`Sequence "${params.name}" (${params.steps.length} steps, ${type}).`);
+    lines.push('To edit and re-run: open the PageBolt dashboard > Sequence Builder > Import JSON and paste this. To run it directly, pass the steps to ' + (type === 'video' ? 'record_video' : 'run_sequence') + '.');
+    lines.push('');
+    lines.push('```json');
+    lines.push(JSON.stringify(payload, null, 2));
+    lines.push('```');
+    return { content: [{ type: 'text', text: lines.join('\n') }] };
+  }
+);
+
 server.tool(
   'import_agent_trace',
   'Convert a page-agent/browser-use action trace into a re-runnable PageBolt sequence. Give it the array of actions a page-agent produced (each entry may be either {action, index|selector, value, ...} or the {action_name: {...}} shape) plus, optionally, the selectors map from observe_page with format:"flatdomtree" to resolve indices to CSS selectors. Set save:false for a dry run that returns the translated steps without persisting. This endpoint does NOT consume request quota. Pair with observe_page (format:"flatdomtree") → run an agent → import_agent_trace to turn an ad-hoc agent run into a deterministic, replayable sequence.',
