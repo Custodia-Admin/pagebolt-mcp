@@ -800,6 +800,7 @@ server.tool(
         thickness: z.number().min(1).max(20).optional().describe('highlight action: line thickness in px (default 4)'),
         padding: z.number().min(0).max(100).optional().describe('highlight action: space between element and outline in px (default 8)'),
         label: z.string().max(80).optional().describe('highlight action: short caption shown next to the element'),
+        pauseAfter: z.number().min(0).max(10000).optional().describe('Milliseconds to hold after THIS step completes (0-10000). Overrides the default inter-step pause — use it to linger on important moments or speed through boring ones.'),
         note: z.string().max(200).optional().describe('Tooltip annotation text shown during this step (max 200 chars). Add a note on EVERY step except wait/wait_for for a guided-tour overlay.'),
         narration: z.string().max(500).optional().describe('Text to speak at this step (max 500 chars, requires audioGuide.enabled). Used in per-step mode.'),
         live: z.boolean().optional().describe('For wait steps: true captures animated content in real-time, false freezes a single frame (default: false)'),
