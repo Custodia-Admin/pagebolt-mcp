@@ -197,6 +197,12 @@ Page-derived text (including `dom_text`) is always wrapped in `UNTRUSTED PAGE CO
 - "Observe https://example.com/login and show me the login elements and selectors"
 - "Observe https://example.com with format flatdomtree so I can drive it with a browser-use agent"
 
+### `export_sequence`
+
+Build a sequence and get it back as JSON you can **edit and re-run**: paste it into the dashboard Sequence builder (*Import JSON*), change any step, highlight or narration, and run it again. Nothing is executed and no quota is used. Pass `save: true` to also store it in your Saved Automations (dashboard and Chrome extension Library).
+
+Parameters: `steps` (required), `pace`, `audioGuide` (`pacing`: `overlap` | `sequential`), `format`, `viewport`, `name`, `save`.
+
 ### `import_agent_trace`
 
 Convert a page-agent / browser-use **action trace** into a re-runnable PageBolt **sequence**. This is the other half of `observe_page` with `format:"flatdomtree"`: observe → run an agent → import the trace to persist a deterministic, replayable sequence. **Does not consume request quota.**

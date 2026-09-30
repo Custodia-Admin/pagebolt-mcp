@@ -168,8 +168,24 @@ const cookieSchema = z.union([
     name: z.string(),
     value: z.string(),
     domain: z.string().optional(),
-  }),
+    url: z.string().optional(),
+    path: z.string().optional(),
+    secure: z.boolean().optional(),
+    httpOnly: z.boolean().optional(),
+    sameSite: z.enum(['Strict', 'Lax', 'None', 'strict', 'lax', 'no_restriction', 'unspecified']).optional(),
+    expires: z.number().optional(),
+    expirationDate: z.number().optional(),
+  }).passthrough(),
 ]);
+
+/** Authenticated capture state (cookies + localStorage) — same shape on video and sequence. */
+const authStateSchema = z.object({
+  cookies: z.array(cookieSchema).max(100).optional().describe('Session cookies (up to 100). Objects may include domain, path, secure, httpOnly, sameSite, expires. Chrome-extension exports (sameSite: no_restriction/lax/strict, expirationDate) are accepted as-is.'),
+  localStorage: z.array(z.object({
+    origin: z.string().describe('Origin the items belong to, e.g. "https://app.example.com"'),
+    items: z.array(z.object({ name: z.string(), value: z.string() })),
+  })).optional().describe('localStorage entries to set before the page loads (for token-in-localStorage apps)'),
+}).optional().describe('Authenticated recording/capture: cookies + localStorage injected BEFORE the first navigation, so protected pages (dashboards, admin panels) render logged-in. Prefer this over scripting a login flow. Values are never logged.');
 
 /** Screenshot style / theme options (frame, background, shadow, etc.) */
 const styleSchema = z.object({
@@ -652,7 +668,7 @@ server.tool(
         selector_a: z.string().optional().describe('CSS selector to capture on the current page as side "A" (for diff action). If omitted, captures the full viewport/page.'),
         threshold: z.number().min(0).max(1).optional().describe('Pixelmatch sensitivity 0–1 (for diff action, default: 0.1). Lower = more sensitive.'),
       })
-    ).min(1).max(20).describe('Array of steps to execute in order. Must include at least one output step (screenshot, pdf, or diff). Max 20 steps, max 5 outputs.'),
+    ).min(1).max(100).describe('Array of steps to execute in order. Must include at least one output step (screenshot, pdf, or diff). Max steps depend on plan (20 Free/Hobby, 30 Starter, 50 Growth, 100 Scale); the server returns a clear plan_limit error if exceeded. Max 5 outputs.'),
     viewport: z.object({
       width: z.number().int().min(320).max(3840).optional().describe('Viewport width (default: 1280)'),
       height: z.number().int().min(200).max(2160).optional().describe('Viewport height (default: 720)'),
@@ -663,6 +679,8 @@ server.tool(
     blockChats: z.boolean().optional().describe('Block live chat widgets'),
     blockTrackers: z.boolean().optional().describe('Block tracking scripts'),
     deviceScaleFactor: z.number().min(1).max(3).optional().describe('Device pixel ratio (default: 1)'),
+    cookies: z.array(cookieSchema).max(100).optional().describe('Cookies to set before navigation — "name=value" strings or full cookie objects (domain, path, secure, httpOnly, sameSite, expires). Up to 100. Domain defaults to the first navigate step\'s host.'),
+    authState: authStateSchema,
     session_id: z.string().optional().describe('Persistent session ID (Starter+ only). Reuse a live browser page created with create_session — browser state (cookies, localStorage, auth) carries over from previous requests in this session.'),
     observeAfterEachStep: z.boolean().optional().describe('FREE (no extra request charged). After every step, attach a compact, token-budgeted state snapshot — page type + the top interactive elements (id/role/name/selector) + suggested actions, NO screenshot. Use this when a step might open a dropdown/popover/modal or navigate: read the trace to confirm what is now on screen and pick the right selector for the NEXT call, instead of blind-batching. Hidden/off-screen elements are filtered out.'),
   },
@@ -765,8 +783,8 @@ server.tool(
       z.object({
         action: z.enum([
           'navigate', 'click', 'dblclick', 'fill', 'select', 'hover',
-          'scroll', 'wait', 'wait_for', 'evaluate', 'press_key',
-        ]).describe('The action to perform (no screenshot/pdf — the whole sequence is recorded as video)'),
+          'scroll', 'wait', 'wait_for', 'evaluate', 'press_key', 'highlight',
+        ]).describe('The action to perform ("highlight" draws an animated attention effect around `selector`; no screenshot/pdf — the whole sequence is recorded as video)'),
         url: z.string().url().optional().describe('URL to navigate to (for navigate action)'),
         selector: z.string().optional().describe('CSS selector for the target element (optional for press_key to focus a field first)'),
         value: z.string().optional().describe('Value to type or select'),
@@ -776,6 +794,13 @@ server.tool(
         x: z.number().optional().describe('Horizontal scroll position in pixels (scroll action). Use when scrolling horizontally without a selector.'),
         y: z.number().optional().describe('Vertical scroll position in pixels (scroll action). REQUIRED when no selector is provided — e.g. {"action":"scroll","y":800} scrolls 800px down.'),
         script: z.string().max(5000).optional().describe('JavaScript to execute in page context (for evaluate action)'),
+        style: z.enum(['outline', 'pulse', 'glow', 'spotlight', 'arrow']).optional().describe('highlight action: outline = animated line circling the element (default), pulse = expanding rings, glow = breathing glow, spotlight = dims everything else, arrow = bobbing arrow pointing at it'),
+        color: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional().describe('highlight action: hex color, e.g. "#818cf8" (default soft indigo)'),
+        duration: z.number().int().min(200).max(15000).optional().describe('highlight action: how long the effect shows, in ms (default 3500; extended automatically when a note is present)'),
+        thickness: z.number().min(1).max(20).optional().describe('highlight action: line thickness in px (default 2)'),
+        padding: z.number().min(0).max(100).optional().describe('highlight action: space between element and outline in px (default 10)'),
+        label: z.string().max(80).optional().describe('highlight action: short caption shown next to the element'),
+        pauseAfter: z.number().min(0).max(10000).optional().describe('Milliseconds to hold after THIS step completes (0-10000). Overrides the default inter-step pause — use it to linger on important moments or speed through boring ones.'),
         note: z.string().max(200).optional().describe('Tooltip annotation text shown during this step (max 200 chars). Add a note on EVERY step except wait/wait_for for a guided-tour overlay.'),
         narration: z.string().max(500).optional().describe('Text to speak at this step (max 500 chars, requires audioGuide.enabled). Used in per-step mode.'),
         live: z.boolean().optional().describe('For wait steps: true captures animated content in real-time, false freezes a single frame (default: false)'),
@@ -847,6 +872,9 @@ server.tool(
     blockChats: z.boolean().optional().describe('Block live chat widgets'),
     blockTrackers: z.boolean().optional().describe('Block tracking scripts'),
     deviceScaleFactor: z.number().min(1).max(3).optional().describe('Device pixel ratio (default: 1)'),
+    // ── Authenticated recording ──
+    cookies: z.array(cookieSchema).max(100).optional().describe('Cookies to set before the first navigation — "name=value" strings or full cookie objects (domain, path, secure, httpOnly, sameSite, expires). Up to 100. Domain defaults to the first navigate step\'s host.'),
+    authState: authStateSchema,
     // ── Audio Guide ──
     audioGuide: z.object({
       enabled: z.boolean().optional().describe('Enable Audio Guide narration'),
@@ -857,6 +885,7 @@ server.tool(
       volume: z.string().optional().describe('Audio volume: default, silent, x-soft, soft, medium, loud, x-loud (Azure only)'),
       style: z.string().optional().describe('Speaking style: narration-professional, cheerful, excited, friendly, etc. (Azure only)'),
       styleDegree: z.number().min(0.01).max(2.0).optional().describe('Style intensity 0.01-2.0 (Azure only)'),
+      pacing: z.enum(['overlap', 'sequential']).optional().describe('overlap (default): narration plays while the video continues (highlights and next steps run alongside it); sequential: each narrated step waits for its clip to finish.'),
       model: z.enum(['tts-1', 'tts-1-hd']).optional().describe('OpenAI model (OpenAI only, default: tts-1)'),
       script: z.string().max(5000).optional().describe('Script mode: a single narration script with {{N}} step markers (0-indexed) for synchronized narration. Steps execute when narration reaches each marker. When provided, per-step "narration" fields are ignored.'),
     }).optional().describe('Audio Guide TTS settings. Two modes: (1) Per-step — add "narration" to individual steps. (2) Script — provide "script" with {{N}} markers for continuous narration synchronized to steps.'),
@@ -1351,6 +1380,85 @@ server.tool(
 // ═══════════════════════════════════════════════════════════════════
 // Tool: import_agent_trace — convert a page-agent/browser-use trace into a sequence
 // ═══════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// Tool: export_sequence — build a re-runnable sequence as importable JSON
+// ═══════════════════════════════════════════════════════════════
+const EXPORT_ACTIONS = ['navigate', 'click', 'dblclick', 'fill', 'select', 'hover', 'scroll', 'wait', 'wait_for', 'evaluate', 'press_key', 'highlight', 'screenshot', 'pdf'];
+const EXPORT_NEEDS = {
+  navigate: ['url'], click: ['selector'], dblclick: ['selector'], fill: ['selector', 'value'],
+  select: ['selector', 'value'], hover: ['selector'], wait_for: [], highlight: ['selector'], evaluate: ['script'],
+};
+
+server.tool(
+  'export_sequence',
+  'Turn a list of steps into a PageBolt sequence you (or the user) can edit and re-run: returns JSON to paste into the dashboard Sequence Builder ("Import JSON" - the same place "Edit sequence" opens), and it can optionally save it to the user\'s Saved Automations (save:true). Use it after you have planned a video/sequence so the user can tweak steps, highlights and narration themselves, or re-run it later with record_video / run_sequence. Does not run the sequence or consume quota. Put {{username}}/{{password}} placeholders in fill steps instead of real credentials; never include cookies.',
+  {
+    name: z.string().min(1).max(100).describe('Name for the sequence (used when saved).'),
+    steps: z.array(z.record(z.string(), z.any())).min(1).max(100).describe('Steps, same shape as record_video / run_sequence steps: {action, url|selector|value|key|ms|x|y|script|style|color|duration|note|narration|pauseAfter|optional}. Prefer scrolling by selector, never guessed pixel offsets.'),
+    type: z.enum(['sequence', 'video']).optional().describe('"video" if it will be recorded with record_video (default), "sequence" for run_sequence.'),
+    description: z.string().max(500).optional().describe('Optional description.'),
+    pace: z.number().min(0.5).max(3).optional().describe('Video pace multiplier (video only).'),
+    format: z.enum(['mp4', 'webm', 'gif']).optional().describe('Video format (video only).'),
+    viewport: z.object({ width: z.number().int(), height: z.number().int() }).optional().describe('Viewport size.'),
+    audioGuide: z.object({
+      enabled: z.boolean().optional(),
+      voice: z.string().optional(),
+      speed: z.number().optional(),
+      script: z.string().optional(),
+      pacing: z.enum(['overlap', 'sequential']).optional().describe('overlap (default): narration plays while the video continues; sequential: video waits for each narration to finish.'),
+    }).optional().describe('Narration settings (video only).'),
+    save: z.boolean().optional().describe('If true, also save it to the user\'s Saved Automations (appears in the dashboard and extension Library). Default false.'),
+  },
+  async (params) => {
+    const type = params.type || 'video';
+    const problems = [];
+    params.steps.forEach((st, i) => {
+      if (!st || !EXPORT_ACTIONS.includes(st.action)) {
+        problems.push(`step ${i + 1}: unknown action "${st && st.action}" (allowed: ${EXPORT_ACTIONS.join(', ')})`);
+        return;
+      }
+      for (const f of EXPORT_NEEDS[st.action] || []) {
+        if (st[f] === undefined || st[f] === '') problems.push(`step ${i + 1} (${st.action}): "${f}" is required`);
+      }
+      if (st.action === 'scroll' && !st.selector && st.y === undefined && st.x === undefined) {
+        problems.push(`step ${i + 1} (scroll): give a "selector" (preferred) or x/y`);
+      }
+      if (st.action === 'fill' && typeof st.value === 'string' && /password/i.test(st.selector || '') && !/^\{\{.*\}\}$/.test(st.value)) {
+        problems.push(`step ${i + 1} (fill): use a {{password}} placeholder instead of a literal password`);
+      }
+    });
+    if (problems.length) {
+      return { content: [{ type: 'text', text: `Cannot export - fix these steps first:\n- ${problems.join('\n- ')}` }], isError: true };
+    }
+
+    const payload = { steps: params.steps };
+    if (params.viewport) payload.viewport = params.viewport;
+    if (type === 'video') {
+      if (params.pace !== undefined) payload.pace = params.pace;
+      if (params.format) payload.format = params.format;
+      if (params.audioGuide) payload.audioGuide = params.audioGuide;
+    }
+
+    const lines = [];
+    if (params.save) {
+      try {
+        const res = await callApi('/api/v1/sequences', { method: 'POST', body: { name: params.name, description: params.description, type, ...payload } });
+        const data = await res.json();
+        lines.push(`Saved to Saved Automations as "${data.name || params.name}" (id ${data.id}). It now shows up in the dashboard Sequence Builder and the extension Library.`);
+      } catch (err) {
+        return { content: [{ type: 'text', text: `Save failed: ${err.message}` }], isError: true };
+      }
+    }
+    lines.push(`Sequence "${params.name}" (${params.steps.length} steps, ${type}).`);
+    lines.push('To edit and re-run: open the PageBolt dashboard > Sequence Builder > Import JSON and paste this. To run it directly, pass the steps to ' + (type === 'video' ? 'record_video' : 'run_sequence') + '.');
+    lines.push('');
+    lines.push('```json');
+    lines.push(JSON.stringify(payload, null, 2));
+    lines.push('```');
+    return { content: [{ type: 'text', text: lines.join('\n') }] };
+  }
+);
+
 server.tool(
   'import_agent_trace',
   'Convert a page-agent/browser-use action trace into a re-runnable PageBolt sequence. Give it the array of actions a page-agent produced (each entry may be either {action, index|selector, value, ...} or the {action_name: {...}} shape) plus, optionally, the selectors map from observe_page with format:"flatdomtree" to resolve indices to CSS selectors. Set save:false for a dry run that returns the translated steps without persisting. This endpoint does NOT consume request quota. Pair with observe_page (format:"flatdomtree") → run an agent → import_agent_trace to turn an ad-hoc agent run into a deterministic, replayable sequence.',
