@@ -560,3 +560,20 @@ test('run_sequence forwards full cookies and authState to /api/v1/sequence', asy
   assert.deepEqual(seen.cookies, [AUTH_COOKIE]);
   assert.deepEqual(seen.authState, AUTH_STATE);
 });
+
+test('run_sequence accepts more than 20 steps (limit is enforced per-plan by the server)', async () => {
+  let seen;
+  await withClient(
+    (url, method, body) => {
+      if (url.endsWith('/api/v1/sequence') && method === 'POST') { seen = body; return jsonResponse({ outputs: [], steps_completed: 30, total_steps: 30 }); }
+      throw new Error(`unexpected request ${method} ${url}`);
+    },
+    async (client) => {
+      const steps = Array.from({ length: 29 }, (_, i) => ({ action: 'navigate', url: `https://example.com/${i}` }));
+      steps.push({ action: 'screenshot', name: 's' });
+      const res = await client.callTool({ name: 'run_sequence', arguments: { steps } });
+      assert.ok(!res.isError, textOf(res));
+    },
+  );
+  assert.equal(seen.steps.length, 30);
+});

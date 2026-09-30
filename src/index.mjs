@@ -668,7 +668,7 @@ server.tool(
         selector_a: z.string().optional().describe('CSS selector to capture on the current page as side "A" (for diff action). If omitted, captures the full viewport/page.'),
         threshold: z.number().min(0).max(1).optional().describe('Pixelmatch sensitivity 0–1 (for diff action, default: 0.1). Lower = more sensitive.'),
       })
-    ).min(1).max(20).describe('Array of steps to execute in order. Must include at least one output step (screenshot, pdf, or diff). Max 20 steps, max 5 outputs.'),
+    ).min(1).max(100).describe('Array of steps to execute in order. Must include at least one output step (screenshot, pdf, or diff). Max steps depend on plan (20 Free/Hobby, 30 Starter, 50 Growth, 100 Scale); the server returns a clear plan_limit error if exceeded. Max 5 outputs.'),
     viewport: z.object({
       width: z.number().int().min(320).max(3840).optional().describe('Viewport width (default: 1280)'),
       height: z.number().int().min(200).max(2160).optional().describe('Viewport height (default: 720)'),
