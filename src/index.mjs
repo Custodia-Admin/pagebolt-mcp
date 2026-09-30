@@ -796,7 +796,7 @@ server.tool(
         script: z.string().max(5000).optional().describe('JavaScript to execute in page context (for evaluate action)'),
         style: z.enum(['outline', 'pulse', 'glow', 'spotlight', 'arrow']).optional().describe('highlight action: outline = animated line circling the element (default), pulse = expanding rings, glow = breathing glow, spotlight = dims everything else, arrow = bobbing arrow pointing at it'),
         color: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional().describe('highlight action: hex color, e.g. "#818cf8" (default soft indigo)'),
-        duration: z.number().int().min(200).max(15000).optional().describe('highlight action: how long the effect shows, in ms (default 2800)'),
+        duration: z.number().int().min(200).max(15000).optional().describe('highlight action: how long the effect shows, in ms (default 3500; extended automatically when a note is present)'),
         thickness: z.number().min(1).max(20).optional().describe('highlight action: line thickness in px (default 2)'),
         padding: z.number().min(0).max(100).optional().describe('highlight action: space between element and outline in px (default 10)'),
         label: z.string().max(80).optional().describe('highlight action: short caption shown next to the element'),
