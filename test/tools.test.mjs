@@ -565,7 +565,7 @@ test('run_sequence accepts more than 20 steps (limit is enforced per-plan by the
   let seen;
   await withClient(
     (url, method, body) => {
-      if (url.endsWith('/api/v1/sequence') && method === 'POST') { seen = body; return jsonResponse({ outputs: [], steps_completed: 30, total_steps: 30 }); }
+      if (url.endsWith('/api/v1/sequence') && method === 'POST') { seen = body; return jsonResponse({ outputs: [], step_results: [], steps_completed: 30, total_steps: 30, total_duration_ms: 1, usage: { outputs_charged: 1, remaining: 99 } }); }
       throw new Error(`unexpected request ${method} ${url}`);
     },
     async (client) => {
