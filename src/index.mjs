@@ -783,8 +783,8 @@ server.tool(
       z.object({
         action: z.enum([
           'navigate', 'click', 'dblclick', 'fill', 'select', 'hover',
-          'scroll', 'wait', 'wait_for', 'evaluate', 'press_key',
-        ]).describe('The action to perform (no screenshot/pdf — the whole sequence is recorded as video)'),
+          'scroll', 'wait', 'wait_for', 'evaluate', 'press_key', 'highlight',
+        ]).describe('The action to perform ("highlight" draws an animated attention effect around `selector`; no screenshot/pdf — the whole sequence is recorded as video)'),
         url: z.string().url().optional().describe('URL to navigate to (for navigate action)'),
         selector: z.string().optional().describe('CSS selector for the target element (optional for press_key to focus a field first)'),
         value: z.string().optional().describe('Value to type or select'),
@@ -794,6 +794,12 @@ server.tool(
         x: z.number().optional().describe('Horizontal scroll position in pixels (scroll action). Use when scrolling horizontally without a selector.'),
         y: z.number().optional().describe('Vertical scroll position in pixels (scroll action). REQUIRED when no selector is provided — e.g. {"action":"scroll","y":800} scrolls 800px down.'),
         script: z.string().max(5000).optional().describe('JavaScript to execute in page context (for evaluate action)'),
+        style: z.enum(['outline', 'pulse', 'glow', 'spotlight', 'arrow']).optional().describe('highlight action: outline = animated line circling the element (default), pulse = expanding rings, glow = breathing glow, spotlight = dims everything else, arrow = bobbing arrow pointing at it'),
+        color: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional().describe('highlight action: hex color, e.g. "#f59e0b" (default amber)'),
+        duration: z.number().int().min(200).max(15000).optional().describe('highlight action: how long the effect shows, in ms (default 2500)'),
+        thickness: z.number().min(1).max(20).optional().describe('highlight action: line thickness in px (default 4)'),
+        padding: z.number().min(0).max(100).optional().describe('highlight action: space between element and outline in px (default 8)'),
+        label: z.string().max(80).optional().describe('highlight action: short caption shown next to the element'),
         note: z.string().max(200).optional().describe('Tooltip annotation text shown during this step (max 200 chars). Add a note on EVERY step except wait/wait_for for a guided-tour overlay.'),
         narration: z.string().max(500).optional().describe('Text to speak at this step (max 500 chars, requires audioGuide.enabled). Used in per-step mode.'),
         live: z.boolean().optional().describe('For wait steps: true captures animated content in real-time, false freezes a single frame (default: false)'),

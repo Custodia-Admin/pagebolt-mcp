@@ -577,3 +577,31 @@ test('run_sequence accepts more than 20 steps (limit is enforced per-plan by the
   );
   assert.equal(seen.steps.length, 30);
 });
+
+test('record_video accepts highlight steps and forwards style/color/duration/label', async () => {
+  let seen;
+  await withClient(
+    (url, method, body) => {
+      if (url.endsWith('/api/v1/video') && method === 'POST') {
+        seen = body;
+        return jsonResponse({ data: Buffer.from('v').toString('base64'), format: 'mp4', duration_ms: 1000, steps_completed: 2, total_steps: 2 });
+      }
+      throw new Error(`unexpected request ${method} ${url}`);
+    },
+    async (client) => {
+      const res = await client.callTool({
+        name: 'record_video',
+        arguments: {
+          async: false,
+          saveTo: join(tmpdir(), 'pagebolt-hl-test.mp4'),
+          steps: [
+            { action: 'navigate', url: 'https://example.com' },
+            { action: 'highlight', selector: '#cta', style: 'spotlight', color: '#ff0066', duration: 3000, label: 'Start here' },
+          ],
+        },
+      });
+      assert.ok(!res.isError, textOf(res));
+    },
+  );
+  assert.deepEqual(seen.steps[1], { action: 'highlight', selector: '#cta', style: 'spotlight', color: '#ff0066', duration: 3000, label: 'Start here' });
+});
