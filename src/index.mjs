@@ -885,6 +885,7 @@ server.tool(
       volume: z.string().optional().describe('Audio volume: default, silent, x-soft, soft, medium, loud, x-loud (Azure only)'),
       style: z.string().optional().describe('Speaking style: narration-professional, cheerful, excited, friendly, etc. (Azure only)'),
       styleDegree: z.number().min(0.01).max(2.0).optional().describe('Style intensity 0.01-2.0 (Azure only)'),
+      pacing: z.enum(['overlap', 'sequential']).optional().describe('overlap (default): narration plays while the video continues (highlights and next steps run alongside it); sequential: each narrated step waits for its clip to finish.'),
       model: z.enum(['tts-1', 'tts-1-hd']).optional().describe('OpenAI model (OpenAI only, default: tts-1)'),
       script: z.string().max(5000).optional().describe('Script mode: a single narration script with {{N}} step markers (0-indexed) for synchronized narration. Steps execute when narration reaches each marker. When provided, per-step "narration" fields are ignored.'),
     }).optional().describe('Audio Guide TTS settings. Two modes: (1) Per-step — add "narration" to individual steps. (2) Script — provide "script" with {{N}} markers for continuous narration synchronized to steps.'),

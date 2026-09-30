@@ -5,6 +5,16 @@ All notable changes to the PageBolt MCP server are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.17.0]
+
+### Added
+
+- **`export_sequence` tool** — build a sequence as importable JSON (steps, pace, `audioGuide`) without running it. Paste it into the dashboard's Sequence builder via *Import JSON*, then edit and re-run. Pass `save: true` to also store it in Saved Automations (shown in the dashboard and the Chrome extension Library).
+- **Authenticated recordings** — `cookies` and `authState` on `record_video`, `run_sequence` and related tools; values are sent to PageBolt only and never returned.
+- **`highlight` step** (soft indigo outline by default, optional note) and **`pauseAfter`** on steps.
+- **`optional: true`** on steps — skipped quickly when the selector isn't on the page (cookie banners, popups).
+- **`audioGuide.pacing`** — `overlap` (default) or `sequential` narration timing.
+
 ## [1.16.1]
 
 ### Improved
