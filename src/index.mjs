@@ -18,22 +18,21 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { writeFileSync } from 'node:fs';
-import { resolve, relative, isAbsolute } from 'node:path';
+import { resolveSavePath, prepareSaveTarget, writeVerified } from './lib/save.mjs';
+import { preflight, formatPreflight, expectedOutputSize } from './lib/limits.mjs';
+import { lookupPlan } from './lib/plan.mjs';
+import { renderEvidence, completenessNote, evidenceImages, renderRehearsal } from './lib/evidence.mjs';
+
+const PKG_VERSION = '1.18.0';
 
 /**
- * Validate that a saveTo path stays within the current working directory.
- * Prevents path traversal attacks (e.g., saveTo: "/etc/cron.d/malicious").
+ * Resolve a saveTo path, confining it to the CWD (or PAGEBOLT_MCP_SAVE_ROOT) to
+ * block path traversal (e.g. saveTo: "/etc/cron.d/malicious"), and create its
+ * parent folder. Throws a descriptive Error instead of failing silently.
  */
 function safePath(userPath, defaultName) {
-  const resolved = resolve(userPath || defaultName);
-  const rel = relative(process.cwd(), resolved);
-  if (isAbsolute(rel) || rel.startsWith('..')) {
-    throw new Error(
-      `saveTo path must be within the current working directory. ` +
-      `Got "${userPath}", which resolves outside CWD (${process.cwd()}).`
-    );
-  }
+  const resolved = resolveSavePath(userPath, defaultName);
+  prepareSaveTarget(resolved);
   return resolved;
 }
 
@@ -61,7 +60,7 @@ async function callApi(endpoint, options = {}) {
   const method = options.method || 'GET';
   const headers = {
     'x-api-key': API_KEY,
-    'user-agent': 'pagebolt-mcp/1.16.1',
+    'user-agent': `pagebolt-mcp/${PKG_VERSION}`,
     ...(options.body ? { 'Content-Type': 'application/json' } : {}),
   };
   const body = options.body ? JSON.stringify(options.body) : undefined;
@@ -157,6 +156,11 @@ function wrapUntrusted(text) {
     text,
     '----- END UNTRUSTED PAGE CONTENT -----',
   ].join('\n');
+}
+
+// Caller's plan (cached, best-effort) for client-side pre-flight checks.
+function currentPlan() {
+  return API_KEY ? lookupPlan({ baseUrl: BASE_URL, apiKey: API_KEY }) : Promise.resolve(null);
 }
 
 // ─── Reusable Zod schemas ────────────────────────────────────────
@@ -347,7 +351,7 @@ Use blockBanners on almost every request to get clean captures. Combine blockAds
 - run_sequence requires at least 1 output step (screenshot, pdf, or diff)
 - run_sequence supports "diff" steps: automate interactions, then diff current page against another URL/HTML
 - record_video does NOT allow screenshot/pdf/diff steps — the whole sequence IS the video
-- Max 2 evaluate (JavaScript) steps per sequence/video
+- Max 10 evaluate (JavaScript) steps per sequence/video
 - fullPage: true on screenshots captures the entire scrollable page
 - fullPageScroll: true triggers lazy-loaded images before capture
 
@@ -365,7 +369,7 @@ Use blockBanners on almost every request to get clean captures. Combine blockAds
 function createConfiguredServer() {
   const srv = new McpServer({
     name: 'pagebolt',
-    version: '1.16.0',
+    version: PKG_VERSION,
   }, {
     instructions: SERVER_INSTRUCTIONS,
   });
@@ -384,7 +388,10 @@ function registerTools(server) {
 // ═══════════════════════════════════════════════════════════════════
 server.tool(
   'take_screenshot',
-  'Capture a screenshot of a URL, HTML, or Markdown content. Supports device emulation, ad/chat/tracker blocking, metadata extraction, geolocation, timezone, styling (macOS/Windows frames, gradient/glass backgrounds, shadows), and more. Returns an image (PNG, JPEG, or WebP).',
+  'Capture a screenshot of a URL, HTML, or Markdown content. Supports device emulation, ad/chat/tracker blocking, metadata extraction, geolocation, timezone, styling (macOS/Windows frames, gradient/glass backgrounds, shadows), and more. Returns an image (PNG, JPEG, or WebP). ' +
+  'Runs in PageBolt\'s cloud browser: the URL must be publicly reachable (localhost/private IPs are refused; tunnel it). That browser has no WebGPU (WebGL is software-only), so GPU-heavy pages render their fallback. ' +
+  'Output is larger than the viewport when style is used: a frame adds a 40 px title bar, a background adds 2 x padding per axis (default 40; theme presets use 32-56). ' +
+  'Animated/canvas content is captured at one instant: use delay or waitForSelector so it has drawn; injectJs runs once before the capture.',
   {
     // ── Source ──
     url: z.string().url().optional().describe('URL to capture (required if no html/markdown)'),
@@ -523,7 +530,7 @@ server.tool(
     footerTemplate: z.string().optional().describe('HTML template for page footer'),
     displayHeaderFooter: z.boolean().optional().describe('Show header and footer (default: false)'),
     delay: z.number().int().min(0).max(10000).optional().describe('Milliseconds to wait before rendering (default: 0)'),
-    saveTo: z.string().optional().describe('Output file path (default: ./output.pdf)'),
+    saveTo: z.string().optional().describe('Output file path (default: ./output.pdf). Missing parent folders are created; must be under the MCP server working directory or PAGEBOLT_MCP_SAVE_ROOT. The result reports the absolute path and bytes, or an error if it could not be saved.'),
   },
   async (params) => {
     if (!params.url && !params.html) {
@@ -540,18 +547,17 @@ server.tool(
       const data = await res.json();
 
       let savedPath = null;
+      let saveError = null;
       try {
-        const outputPath = safePath(saveTo, './output.pdf');
-        const buffer = Buffer.from(data.data, 'base64');
-        writeFileSync(outputPath, buffer);
-        savedPath = outputPath;
-      } catch (_diskErr) {
-        // Disk write failed — data still returned as embedded resource
+        const saved = writeVerified(safePath(saveTo, './output.pdf'), Buffer.from(data.data, 'base64'));
+        savedPath = `${saved.path} (${saved.bytes} bytes)`;
+      } catch (diskErr) {
+        saveError = diskErr.message;
       }
 
       const fileNote = savedPath
         ? `  File: ${savedPath}`
-        : `  File: (not saved to disk — use the embedded resource data below)`;
+        : `  File: NOT SAVED - ${saveError} The PDF is still embedded below.`;
 
       return {
         content: [
@@ -571,6 +577,7 @@ server.tool(
               `  Duration: ${data.duration_ms}ms`,
           },
         ],
+        ...(saveError && saveTo ? { isError: true } : {}),
       };
     } catch (err) {
       return { content: [{ type: 'text', text: `PDF error: ${err.message}` }], isError: true };
@@ -632,7 +639,10 @@ server.tool(
 // ═══════════════════════════════════════════════════════════════════
 server.tool(
   'run_sequence',
-  'Execute a multi-step browser automation sequence. Navigate pages, interact with elements (click, fill, select), and capture multiple screenshots/PDFs/diffs in a single browser session. Use the "diff" step to compare the current page state against another URL after automation. Each output counts as 1 API request.',
+  'Execute a multi-step browser automation sequence. Navigate pages, interact with elements (click, fill, select), and capture multiple screenshots/PDFs/diffs in a single browser session. Use the "diff" step to compare the current page state against another URL after automation. Each output counts as 1 API request. ' +
+  'Limits: max steps by plan 20 Free/Hobby, 30 Starter, 50 Growth, 100 Scale; max 5 outputs; max 10 evaluate steps (400 otherwise; script <= 5000 chars); 60 s total budget (+1.5 s per step above 20, cap 120 s), 15 s per step. ' +
+  '"wait" is a plain delay here (live is video-only): use wait_for with a selector to wait for readiness. Runs in PageBolt\'s cloud browser: public URLs only, no WebGPU (WebGL is software-only). ' +
+  'The result starts with client-side pre-flight warnings when the plan looks wrong for the sequence (evaluate count, steps vs your plan).',
   {
     steps: z.array(
       z.object({
@@ -688,6 +698,14 @@ server.tool(
     if (!params.steps || params.steps.length === 0) {
       return { content: [{ type: 'text', text: 'Error: "steps" must be a non-empty array.' }], isError: true };
     }
+
+    const plan = await currentPlan();
+    const pre = preflight('sequence', params, { plan });
+    if (pre.errors.length) {
+      return { content: [{ type: 'text', text: `Not sent (nothing was billed). Fix first:\n- ${pre.errors.join('\n- ')}` }], isError: true };
+    }
+    const preText = formatPreflight(pre);
+    const withPre = (r) => (preText ? { ...r, content: [...r.content, { type: 'text', text: preText }] } : r);
 
     try {
       const res = await callApi('/api/v1/sequence', {
@@ -764,10 +782,15 @@ server.tool(
         summary += `\n\nState trace (observeAfterEachStep — free):\n${lines.join('\n')}`;
       }
 
+      const evidence = renderEvidence(data, params.steps, { failures: false });
+      if (evidence) summary += `\n\n${evidence}`;
+      const incomplete = completenessNote(data);
+      if (incomplete) summary += `\n${incomplete}`;
+
       content.push({ type: 'text', text: summary });
-      return { content };
+      return withPre({ content });
     } catch (err) {
-      return { content: [{ type: 'text', text: `Sequence error: ${err.message}` }], isError: true };
+      return withPre({ content: [{ type: 'text', text: `Sequence error: ${err.message}` }], isError: true });
     }
   }
 );
@@ -777,39 +800,63 @@ server.tool(
 // ═══════════════════════════════════════════════════════════════════
 server.tool(
   'record_video',
-  'Record a professional demo video of a multi-step browser automation sequence. Produces MP4/WebM/GIF with cursor highlighting, click effects, smooth movement, step notes, browser frame (macOS/Windows), gradient/glass backgrounds, and more. Costs 3 API requests. Saves to disk. BEST PRACTICE: Keep videos concise (5-15 action steps). Do NOT add wait steps between every action — the pace parameter handles timing. Only use wait for page loads or narration holds. Do NOT use zoom unless the user explicitly asks for it.',
+  'Record a demo video of a multi-step browser automation sequence. Produces MP4/WebM/GIF with cursor highlighting, click effects, step notes, browser frame, gradient backgrounds and optional narration. Costs 3 API requests. ' +
+  'It renders in PageBolt\'s CLOUD browser: the target must be public HTTPS (localhost/private IPs are refused; expose the app through a tunnel). ' +
+  'RULES: ' +
+  '(1) A wait is captured LIVE by default after click/dblclick/navigate/press_key/select/evaluate (and after anything else when a ~300 ms probe sees the page repaint), so animation, video, canvas and loading states are recorded; {action:"wait", ms, live:false} forces a one-frame static hold. ms <= 10000, multiplied by pace; pace already pauses between steps, do not pad. ' +
+  '(2) Max 10 evaluate steps per video (400 otherwise), script <= 5000 chars. An evaluate IS recorded while its promise is pending (async IIFE with setTimeouts / rAF loops show up). ' +
+  '(3) Plan limits, steps / base budget + per step: Free 10 / 20 s + 5 s, Hobby 15 / 25 s + 5 s, Starter 20 / 30 s + 5 s, Growth 30 / 45 s + 6 s, Scale 50 / 60 s + 6 s (per-step part x max(pace,1)). When the budget, ~240 s of wall clock or 5000 frames is reached the render STOPS and drops the remaining steps without an error; check "Steps: N/M completed" and aim for <= 200 s (pre-flight estimates it). ' +
+  '(4) Output size = viewport x deviceScaleFactor; frame adds a 40 px x dsf title bar, background adds 2 x padding (default 40) per axis (1440x900 + both = 1520x1020); pass output:{width,height,fit:"contain"|"cover"} for an exact canvas such as 1920x1080 (even numbers, not for gif). Narration audio is 48 kHz stereo by default (AAC in mp4, Opus in webm; not available for gif); audio:{sampleRate:24000,channels:1} restores the old mono track. ' +
+  '(5) PageBolt browsers have no WebGPU (no GPU: requestAdapter() returns null) and WebGL is software (SwiftShader), so WebGPU apps record their fallback path; strip fallback notices from the page you record. ' +
+  '(6) Verify the render: the result lists steps that failed, were skipped, were cut or had a target nobody can see (visible:false), plus warnings and stopped_early; "Steps: N/N" alone does not prove anything moved. Cheapest check: rehearse:true (POST /video/rehearse: 1 API request per 10 steps, a screenshot per step, nothing encoded). Add step_thumbnails:true to get one small image per step from the real render. Hosted async videos are private and cannot be downloaded with the API key. ' +
+  '(7) saveTo creates missing parent folders, must be under the MCP server working directory (or PAGEBOLT_MCP_SAVE_ROOT), and the result states absolute path and bytes; if it cannot save, the call returns an error instead of "saved". ' +
+  'Keep videos concise (5-15 action steps); no zoom unless the user asks.',
   {
     steps: z.array(
       z.object({
         action: z.enum([
           'navigate', 'click', 'dblclick', 'fill', 'select', 'hover',
-          'scroll', 'wait', 'wait_for', 'evaluate', 'press_key', 'highlight',
-        ]).describe('The action to perform ("highlight" draws an animated attention effect around `selector`; no screenshot/pdf — the whole sequence is recorded as video)'),
+          'scroll', 'wait', 'wait_for', 'evaluate', 'press_key', 'highlight', 'card',
+        ]).describe('The action to perform ("highlight" draws an attention effect around `selector` or `rect`; "card" shows a full-viewport title card inside the recording; no screenshot/pdf — the whole sequence is recorded as video)'),
         url: z.string().url().optional().describe('URL to navigate to (for navigate action)'),
         selector: z.string().optional().describe('CSS selector for the target element (optional for press_key to focus a field first)'),
+        rect: z.object({ x: z.number().min(0), y: z.number().min(0), width: z.number().positive(), height: z.number().positive() }).optional().describe('highlight: viewport rectangle in CSS px to highlight INSTEAD of a selector (canvas / WebGL / map regions). Must lie inside the viewport; give selector OR rect, not both.'),
+        title: z.string().max(120).optional().describe('card action (required): headline text.'),
+        subtitle: z.string().max(240).optional().describe('card action: secondary text.'),
+        footer: z.string().max(120).optional().describe('card action: small text at the bottom.'),
+        theme: z.object({
+          background: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional(),
+          foreground: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional(),
+          accent: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional(),
+          fontFamily: z.string().max(200).optional().describe('Plain font stack: letters, digits, spaces, commas, quotes, dashes.'),
+        }).optional().describe('card action: colours (#RRGGBB) and font stack. Default: light paper background, dark text, one accent.'),
+        durationMs: z.number().min(500).max(10000).optional().describe('card action: how long the card stays up, 500-10000 ms (default 3000, not pace-scaled). With narration it stays up for the whole sentence (+400 ms).'),
         value: z.string().optional().describe('Value to type or select'),
         key: z.enum(['Escape', 'Enter', 'Tab', 'Backspace', 'Delete', 'Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown']).optional().describe('Key to press (for press_key action). Use Escape to dismiss a dropdown/popover/modal that a previous step opened — the cleanest way to avoid a stuck-open overlay obscuring later steps.'),
-        ms: z.number().int().min(0).max(10000).optional().describe('Milliseconds to wait (for wait action). Only use wait steps when the page needs loading time or to hold for narration — the pace parameter handles inter-step timing automatically.'),
+        ms: z.number().int().min(0).max(10000).optional().describe('Milliseconds to wait (wait action), multiplied by pace and capped at 10000. Without live:true the wait freezes one frame. Only use wait for loading time, animation capture (live:true) or narration holds; pace handles inter-step timing.'),
         timeout: z.number().int().min(0).max(15000).optional().describe('Timeout in ms for wait_for (default: 10000)'),
-        x: z.number().optional().describe('Horizontal scroll position in pixels (scroll action). Use when scrolling horizontally without a selector.'),
-        y: z.number().optional().describe('Vertical scroll position in pixels (scroll action). REQUIRED when no selector is provided — e.g. {"action":"scroll","y":800} scrolls 800px down.'),
-        script: z.string().max(5000).optional().describe('JavaScript to execute in page context (for evaluate action)'),
-        style: z.enum(['outline', 'pulse', 'glow', 'spotlight', 'arrow']).optional().describe('highlight action: outline = animated line circling the element (default), pulse = expanding rings, glow = breathing glow, spotlight = dims everything else, arrow = bobbing arrow pointing at it'),
+        x: z.number().optional().describe('scroll: horizontal scroll position in pixels (without a selector). click/dblclick/hover: viewport X in CSS px of the point to act on INSTEAD of a selector (canvas, WebGL, maps; pair with y; must be inside the viewport; cannot be combined with selector).'),
+        y: z.number().optional().describe('scroll: vertical scroll position in pixels, REQUIRED without a selector, e.g. {"action":"scroll","y":800}. click/dblclick/hover: viewport Y in CSS px of the point to act on (pair with x).'),
+        script: z.string().max(5000).optional().describe('JavaScript to execute in page context (evaluate action). Max 10 evaluate steps per video. It is recorded while its promise is pending (await your animation inside an async IIFE); a wait that follows is live by default.'),
+        style: z.enum(['outline', 'pulse', 'glow', 'spotlight', 'arrow', 'focus', 'ring', 'glide']).optional().describe('highlight action: focus = ring draws itself in + soft spotlight dim (DEFAULT when the video is narrated), ring = the same without the dim, glide = like focus and glides/morphs from the previous highlight (put consecutive glide highlights in a row). Legacy: outline (default when not narrated), pulse, glow, spotlight, arrow.'),
         color: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional().describe('highlight action: hex color, e.g. "#818cf8" (default soft indigo)'),
-        duration: z.number().int().min(200).max(15000).optional().describe('highlight action: how long the effect shows, in ms (default 3500; extended automatically when a note is present)'),
+        duration: z.number().int().min(200).max(15000).optional().describe('highlight action: how long the effect shows, in ms (default 3500). Extended to the length of its narration clip and of a note unless exactDuration:true.'),
+        exactDuration: z.boolean().optional().describe('highlight action: end at `duration` even if the narration carries on.'),
+        requireVisible: z.boolean().optional().describe('highlight action: fail the step (instead of a visible:false warning and no highlight) when the target is hidden, zero-size, transparent, off-screen or covered.'),
+        camera: z.union([z.boolean(), z.number().min(1.02).max(1.25)]).optional().describe('highlight action (focus/ring/glide): slow camera push-in; true or a zoom factor 1.02-1.25. Ignored for chained glides and steps with a note.'),
         thickness: z.number().min(1).max(20).optional().describe('highlight action: line thickness in px (default 2)'),
         padding: z.number().min(0).max(100).optional().describe('highlight action: space between element and outline in px (default 10)'),
         label: z.string().max(80).optional().describe('highlight action: short caption shown next to the element'),
         pauseAfter: z.number().min(0).max(10000).optional().describe('Milliseconds to hold after THIS step completes (0-10000). Overrides the default inter-step pause — use it to linger on important moments or speed through boring ones.'),
         note: z.string().max(200).optional().describe('Tooltip annotation text shown during this step (max 200 chars). Add a note on EVERY step except wait/wait_for for a guided-tour overlay.'),
         narration: z.string().max(500).optional().describe('Text to speak at this step (max 500 chars, requires audioGuide.enabled). Used in per-step mode.'),
-        live: z.boolean().optional().describe('For wait steps: true captures animated content in real-time, false freezes a single frame (default: false)'),
+        live: z.boolean().optional().describe('wait steps only. true = record in real time; false = freeze ONE frame for the whole wait (a still hold, never warned about). Omit it: the server records live after click/dblclick/navigate/press_key/select/evaluate and probes ~300 ms elsewhere.'),
         zoom: z.object({
           enabled: z.boolean().optional().describe('Enable zoom on this step (default: false). Only use when user explicitly requests zoom.'),
           level: z.number().min(1.2).max(4).optional().describe('Zoom magnification (inherits from global zoom.level if not set)'),
         }).optional().describe('Per-step zoom override. Do NOT add zoom unless the user specifically requests it — it adds encoding time and visual complexity.'),
       })
-    ).min(1).max(50).describe('Array of action steps to record. Keep concise: 5-15 steps is ideal. Do NOT pad with wait steps — pace handles timing.'),
+    ).min(1).max(50).describe('Array of action steps to record. Keep concise: 5-15 steps is ideal. Plan caps: Free 10, Hobby 15, Starter 20, Growth 30, Scale 50 (400 above your cap). Do NOT pad with wait steps — pace handles timing.'),
     viewport: z.object({
       width: z.number().int().min(320).max(3840).optional().describe('Viewport width (default: 1280)'),
       height: z.number().int().min(200).max(2160).optional().describe('Viewport height (default: 720)'),
@@ -872,6 +919,19 @@ server.tool(
     blockChats: z.boolean().optional().describe('Block live chat widgets'),
     blockTrackers: z.boolean().optional().describe('Block tracking scripts'),
     deviceScaleFactor: z.number().min(1).max(3).optional().describe('Device pixel ratio (default: 1)'),
+    // ── Authoring (requires pagebolt feat/video-authoring) ──
+    output: z.object({
+      width: z.number().int().min(320).max(3840),
+      height: z.number().int().min(200).max(2160),
+      fit: z.enum(['contain', 'cover']).optional().describe('contain (default): whole picture, remaining canvas filled with the background (black without one); cover: fill the canvas and crop the overflow.'),
+    }).optional().describe('Exact output canvas the FINAL composed video (frame + background included) is scaled into, e.g. {width:1920,height:1080,fit:"contain"}. Width/height must be even; width 320-3840, height 180-2160. Not for gif. Omit for the viewport-derived size.'),
+    audio: z.object({
+      sampleRate: z.union([z.literal(24000), z.literal(44100), z.literal(48000)]).optional().describe('Narration sample rate in Hz (default 48000; webm/Opus maps 44100 to 48000).'),
+      channels: z.union([z.literal(1), z.literal(2)]).optional().describe('1 = mono, 2 = stereo (default).'),
+    }).optional().describe('Narration track format. Default 48 kHz stereo; {sampleRate:24000, channels:1} reproduces the old track.'),
+    step_thumbnails: z.boolean().optional().describe('Add a small JPEG of each step to step_results (thumbnail_base64, ~400 KB total cap); this tool returns them as images so you can SEE the render.'),
+    rehearse: z.boolean().optional().describe('Dry run via POST /api/v1/video/rehearse: runs the real step code at fast pace against the real page, encodes nothing and speaks nothing, and returns a screenshot per step with ok/error, visible and the resolved element box. Costs 1 API request per 10 steps (a recording costs 3). Use it to fix selectors, coordinates and off-screen targets before the real render. Narration, frame, background, output, audio and format are ignored.'),
+    screenshots: z.boolean().optional().describe('rehearse only: false = no screenshots (flat 1 request).'),
     // ── Authenticated recording ──
     cookies: z.array(cookieSchema).max(100).optional().describe('Cookies to set before the first navigation — "name=value" strings or full cookie objects (domain, path, secure, httpOnly, sameSite, expires). Up to 100. Domain defaults to the first navigate step\'s host.'),
     authState: authStateSchema,
@@ -887,12 +947,14 @@ server.tool(
       styleDegree: z.number().min(0.01).max(2.0).optional().describe('Style intensity 0.01-2.0 (Azure only)'),
       pacing: z.enum(['overlap', 'sequential']).optional().describe('overlap (default): narration plays while the video continues (highlights and next steps run alongside it); sequential: each narrated step waits for its clip to finish.'),
       model: z.enum(['tts-1', 'tts-1-hd']).optional().describe('OpenAI model (OpenAI only, default: tts-1)'),
+      pronunciations: z.record(z.string(), z.union([z.string(), z.object({ alias: z.string().optional(), ipa: z.string().optional(), caseSensitive: z.boolean().optional() })])).optional().describe('Word -> how to say it: {"codicil":"kod ih sill"} or {"Hale":{"ipa":"heɪl"}} (IPA: Azure). Built-in defaults: AI -> "A.I.", "e.g.", "vs.", "&".'),
+      speakYears: z.boolean().optional().describe('Read four-digit years aloud as years (default false: left to the voice).'),
       script: z.string().max(5000).optional().describe('Script mode: a single narration script with {{N}} step markers (0-indexed) for synchronized narration. Steps execute when narration reaches each marker. When provided, per-step "narration" fields are ignored.'),
     }).optional().describe('Audio Guide TTS settings. Two modes: (1) Per-step — add "narration" to individual steps. (2) Script — provide "script" with {{N}} markers for continuous narration synchronized to steps.'),
     variables: z.record(z.string()).optional().describe('Key-value map for variable substitution in step URLs/values. E.g. { "base_url": "https://example.com" } replaces {{base_url}} in steps.'),
     async: z.boolean().optional().describe('Render via an async job for reliability. The video is enqueued (202 + job_id) and this tool polls until it finishes, so long recordings do not hit the API\'s per-request timeout. The finished video is delivered as a private hosted URL (its bytes cannot be pulled back via the API key). Set false to force a single blocking synchronous request that returns the video INLINE (base64 embedded + saved to saveTo). DEFAULT: true, except when you pass saveTo (then sync is used so the file is actually produced on disk). If async is unavailable on your plan, it automatically falls back to sync. Quota is charged only on success; max 5 pending jobs per account.'),
     pollTimeoutMs: z.number().int().min(10_000).max(600_000).optional().describe('Max time to wait for an async video job to finish, in milliseconds (default: 240000 = 4 min). If the job is still running when this elapses, the job_id is returned so you can check it later with get_job.'),
-    saveTo: z.string().optional().describe('Output file path (default: ./recording.mp4)'),
+    saveTo: z.string().optional().describe('Output file path (default: ./recording.mp4). Missing parent folders are created; must be under the MCP server working directory or PAGEBOLT_MCP_SAVE_ROOT. The result reports the absolute path and byte size, or an error if it could not be saved. Passing it selects the synchronous path (no hosted URL) unless async:true.'),
   },
   async (params) => {
     if (!params.steps || params.steps.length === 0) {
@@ -911,26 +973,79 @@ server.tool(
     const wantsLocalFile = saveTo != null;
     const useAsync = asyncOpt === undefined ? !wantsLocalFile : asyncOpt !== false;
 
-    // Best-effort save-to-disk + embedded-resource for a base64 video payload.
-    const deliverInline = (data, extra = '') => {
-      let savedPath = null;
+    // ── Pre-flight (client-side, free): hard errors stop the call BEFORE it is billed;
+    //    warnings ride along in the result. ──
+    const plan = await currentPlan();
+    const pre = preflight('video', params, { plan });
+    if (pre.errors.length) {
+      return { content: [{ type: 'text', text: `Not sent (nothing was billed). Fix first:\n- ${pre.errors.join('\n- ')}` }], isError: true };
+    }
+    // An unwritable saveTo must fail NOW, not after a paid render.
+    let savePath = null;
+    if (wantsLocalFile) {
       try {
-        const outputPath = safePath(saveTo, `./recording.${ext}`);
-        writeFileSync(outputPath, Buffer.from(data.data, 'base64'));
-        savedPath = outputPath;
-      } catch (_diskErr) {
-        // Disk write failed (e.g. hosted/read-only FS) — data is still returned
-        // as an embedded resource below, so the client still gets the video.
+        savePath = safePath(saveTo, `./recording.${ext}`);
+      } catch (saveErr) {
+        return { content: [{ type: 'text', text: `Not sent (nothing was billed). ${saveErr.message}` }], isError: true };
+      }
+    }
+    // Dry run: POST /api/v1/video/rehearse. Same validation as a recording; nothing is encoded or spoken.
+    if (params.rehearse) {
+      try {
+        const { rehearse: _r, async: _a, saveTo: _s, pollTimeoutMs: _p, ...rehearseBody } = apiParams;
+        const res = await callApi('/api/v1/video/rehearse', { method: 'POST', body: rehearseBody });
+        const data = await res.json();
+        if (!Array.isArray(data.steps)) {
+          return { content: [{ type: 'text', text: 'Rehearsal: the backend returned no per-step data (it may not support /api/v1/video/rehearse yet).' }], isError: true };
+        }
+        const out = renderRehearsal(data, params.steps);
+        const preBlock = formatPreflight(pre, { includeEstimate: false });
+        return { content: [{ type: 'text', text: out.text + (preBlock ? '\n' + preBlock : '') }, ...out.images] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: `Rehearsal error: ${err.message}` }], isError: true };
+      }
+    }
+    const preText = formatPreflight(pre);
+    const expected = expectedOutputSize(params);
+    const decorate = (result) => (preText ? { ...result, content: [...result.content, { type: 'text', text: preText }] } : result);
+
+    // Evidence + completeness block shared by every success path.
+    const evidenceText = (d) => {
+      const parts = [renderEvidence(d, params.steps), completenessNote(d)].filter(Boolean);
+      const hasTimeline = Array.isArray(d.step_results) && d.step_results.some((r) => r && (r.start_s != null || typeof r.changed === 'boolean'));
+      if (d.steps_completed != null && d.steps_completed >= d.total_steps && !hasTimeline) {
+        parts.push('  Note: "Steps N/N" means no step errored, not that anything moved. Check a frame before trusting it.');
+      }
+      return parts.length ? '\n' + parts.join('\n') : '';
+    };
+    const sizeLine = (d) => {
+      const w = d.width ?? d.output_width;
+      const h = d.height ?? d.output_height;
+      return w && h ? `  Output:   ${w}x${h}` : `  Output:   ~${expected.width}x${expected.height} (viewport${params.frame && params.frame.enabled ? ' + frame' : ''}${params.background && params.background.enabled ? ' + background' : ''}, expected)`;
+    };
+
+    // Save the video (when asked, or to the default ./recording.<ext>) and describe the outcome.
+    // Never claims "saved" unless the bytes were read back from disk.
+    const deliverInline = (data, extra = '') => {
+      let savedNote = null;
+      let saveError = null;
+      try {
+        const target = savePath || safePath(undefined, `./recording.${ext}`);
+        const saved = writeVerified(target, Buffer.from(data.data, 'base64'));
+        savedNote = `${saved.path} (${saved.bytes} bytes)`;
+      } catch (diskErr) {
+        saveError = diskErr.message;
       }
       const durationSec = data.duration_ms != null ? (data.duration_ms / 1000).toFixed(1) : '?';
       const usage = data.usage || {};
       const lines = ['Video recorded successfully.'];
-      lines.push(savedPath
-        ? `  File:     ${savedPath}`
-        : `  File:     (not saved to disk — use the embedded resource data below)`);
+      lines.push(savedNote
+        ? `  File:     ${savedNote}`
+        : `  File:     NOT SAVED - ${saveError} The video is embedded below.`);
       lines.push(`  Format:   ${data.format || format}`);
       if (data.size_bytes != null) lines.push(`  Size:     ${(data.size_bytes / 1024).toFixed(1)} KB`);
       lines.push(`  Duration: ${durationSec}s`);
+      lines.push(sizeLine(data));
       if (data.frames != null) lines.push(`  Frames:   ${data.frames}`);
       if (data.steps_completed != null) lines.push(`  Steps:    ${data.steps_completed}/${data.total_steps} completed`);
       if (usage.video_cost != null) lines.push(`  Cost:     ${usage.video_cost} API requests`);
@@ -947,9 +1062,11 @@ server.tool(
           },
           {
             type: 'text',
-            text: lines.join('\n') + (extra || ''),
+            text: lines.join('\n') + evidenceText(data) + (extra || ''),
           },
+          ...evidenceImages(data),
         ],
+        ...(saveError && wantsLocalFile ? { isError: true } : {}),
       };
     };
 
@@ -965,7 +1082,7 @@ server.tool(
 
     try {
       if (!useAsync) {
-        return await recordSync();
+        return decorate(await recordSync());
       }
 
       // Async path: enqueue, then poll the job until it completes.
@@ -978,18 +1095,18 @@ server.tool(
         enqueue = await res.json();
       } catch (asyncErr) {
         // Async likely unavailable (older API / plan) — fall back to sync.
-        return await recordSync();
+        return decorate(await recordSync());
       }
 
       // If the server ignored async and returned the video inline, deliver it.
       if (enqueue && enqueue.data && !enqueue.job_id) {
-        return deliverInline(enqueue);
+        return decorate(deliverInline(enqueue));
       }
 
       const jobId = enqueue && (enqueue.job_id || enqueue.id);
       if (!jobId) {
         // Unexpected shape — fall back to sync rather than failing.
-        return await recordSync();
+        return decorate(await recordSync());
       }
 
       let job;
@@ -998,7 +1115,7 @@ server.tool(
       } catch (pollErr) {
         if (pollErr.timedOut) {
           const statusUrl = enqueue.status_url || `/api/v1/jobs/${jobId}`;
-          return {
+          return decorate({
             content: [{
               type: 'text',
               text: `Video job still processing.\n` +
@@ -1007,13 +1124,13 @@ server.tool(
                 `  Check:  get_job with job_id "${jobId}" (or GET ${statusUrl}).\n` +
                 `The render exceeded the poll timeout but is still running server-side; quota is charged only on success.`,
             }],
-          };
+          });
         }
         throw pollErr;
       }
 
       if (job.status === 'failed') {
-        return { content: [{ type: 'text', text: `Video recording failed: ${job.error || 'unknown error'} (job ${jobId}).` }], isError: true };
+        return decorate({ content: [{ type: 'text', text: `Video recording failed: ${job.error || 'unknown error'} (job ${jobId}).${evidenceText(job.output || job)}` }], isError: true });
       }
 
       const output = job.output || {};
@@ -1043,19 +1160,22 @@ server.tool(
       }
 
       if (inlineData) {
-        return deliverInline(
+        return decorate(deliverInline(
           { ...output, data: inlineData },
           `\n  Job ID:   ${jobId}\n${urlLines}`.replace(/\n$/, ''),
-        );
+        ));
       }
 
       // No bytes to embed — return the hosted URLs (fully usable on their own).
       const durationSec = output.duration_ms != null ? (output.duration_ms / 1000).toFixed(1) : '?';
-      const hint = downloadFailed
-        ? `\nNote: the hosted video is private, so it could not be downloaded to "${saveTo}". ` +
-          `Open it at the URL above, or call record_video again with async: false to get the video file inline / saved to disk.`
+      const hint = wantsLocalFile
+        ? `\n  File:     NOT SAVED - nothing was written to ${savePath}. ` +
+          (downloadFailed
+            ? 'The hosted video is private and could not be downloaded. '
+            : 'The hosted job returned no downloadable file. ') +
+          `Open the Watch URL, or call record_video again with async:false to get the file inline and saved to disk.`
         : '';
-      return {
+      return decorate({
         content: [{
           type: 'text',
           text: `Video recorded successfully (hosted).\n` +
@@ -1063,11 +1183,12 @@ server.tool(
             `  Format:   ${output.format || format}\n` +
             (output.size_bytes != null ? `  Size:     ${(output.size_bytes / 1024).toFixed(1)} KB\n` : '') +
             `  Duration: ${durationSec}s\n` +
+            `${sizeLine(output)}\n` +
             (output.frames != null ? `  Frames:   ${output.frames}\n` : '') +
             (output.steps_completed != null ? `  Steps:    ${output.steps_completed}/${output.total_steps} completed\n` : '') +
-            urlLines + hint,
+            urlLines.replace(/\n$/, '') + hint + evidenceText(output),
         }],
-      };
+      });
     } catch (err) {
       return { content: [{ type: 'text', text: `Video recording error: ${err.message}` }], isError: true };
     }
@@ -1079,7 +1200,8 @@ server.tool(
 // ═══════════════════════════════════════════════════════════════════
 server.tool(
   'inspect_page',
-  'Inspect a web page and get a structured map of all interactive elements, headings, forms, links, and images — each with a unique CSS selector. Use this BEFORE run_sequence or record_video to discover what elements exist on the page and get reliable selectors. Returns text (not an image), so it is fast and cheap. Costs 1 API request.',
+  'Inspect a web page and get a structured map of all interactive elements, headings, forms, links, and images — each with a unique CSS selector. Use this BEFORE run_sequence or record_video to discover what elements exist on the page and get reliable selectors. Returns text (not an image), so it is fast and cheap. Costs 1 API request. ' +
+  'Selectors are valid for the page as loaded: re-inspect after navigating, and note elements inside collapsed menus are listed too (click the toggle first). Use the same cookies/authState you will record with, or you inspect the login page. Cloud browser: public URLs only, no WebGPU; set includeConsole to see fallback/error notices a recording would show.',
   {
     // ── Source ──
     url: z.string().url().optional().describe('URL to inspect (required if no html)'),
@@ -1383,15 +1505,17 @@ server.tool(
 // ═══════════════════════════════════════════════════════════════
 // Tool: export_sequence — build a re-runnable sequence as importable JSON
 // ═══════════════════════════════════════════════════════════════
-const EXPORT_ACTIONS = ['navigate', 'click', 'dblclick', 'fill', 'select', 'hover', 'scroll', 'wait', 'wait_for', 'evaluate', 'press_key', 'highlight', 'screenshot', 'pdf'];
+const EXPORT_ACTIONS = ['navigate', 'click', 'dblclick', 'fill', 'select', 'hover', 'scroll', 'wait', 'wait_for', 'evaluate', 'press_key', 'highlight', 'card', 'screenshot', 'pdf'];
 const EXPORT_NEEDS = {
   navigate: ['url'], click: ['selector'], dblclick: ['selector'], fill: ['selector', 'value'],
-  select: ['selector', 'value'], hover: ['selector'], wait_for: [], highlight: ['selector'], evaluate: ['script'],
+  select: ['selector', 'value'], hover: ['selector'], wait_for: [], highlight: ['selector'], evaluate: ['script'], card: ['title'],
 };
+// Authoring alternatives: a field may be replaced by another (canvas UIs have no selector).
+const EXPORT_ALT = { click: { selector: 'x' }, dblclick: { selector: 'x' }, hover: { selector: 'x' }, highlight: { selector: 'rect' } };
 
 server.tool(
   'export_sequence',
-  'Turn a list of steps into a PageBolt sequence you (or the user) can edit and re-run: returns JSON to paste into the dashboard Sequence Builder ("Import JSON" - the same place "Edit sequence" opens), and it can optionally save it to the user\'s Saved Automations (save:true). Use it after you have planned a video/sequence so the user can tweak steps, highlights and narration themselves, or re-run it later with record_video / run_sequence. Does not run the sequence or consume quota. Put {{username}}/{{password}} placeholders in fill steps instead of real credentials; never include cookies.',
+  'Turn a list of steps into a PageBolt sequence you (or the user) can edit and re-run: returns JSON to paste into the dashboard Sequence Builder ("Import JSON" - the same place "Edit sequence" opens), and it can optionally save it to the user\'s Saved Automations (save:true). Use it after you have planned a video/sequence so the user can tweak steps, highlights and narration themselves, or re-run it later with record_video / run_sequence. Does not run the sequence or consume quota. It reports the same pre-flight warnings as record_video (max 2 evaluate steps, plan step limits, live waits, estimated length vs ~200 s). Put {{username}}/{{password}} placeholders in fill steps instead of real credentials; never include cookies.',
   {
     name: z.string().min(1).max(100).describe('Name for the sequence (used when saved).'),
     steps: z.array(z.record(z.string(), z.any())).min(1).max(100).describe('Steps, same shape as record_video / run_sequence steps: {action, url|selector|value|key|ms|x|y|script|style|color|duration|note|narration|pauseAfter|optional}. Prefer scrolling by selector, never guessed pixel offsets.'),
@@ -1418,6 +1542,8 @@ server.tool(
         return;
       }
       for (const f of EXPORT_NEEDS[st.action] || []) {
+        const alt = EXPORT_ALT[st.action] && EXPORT_ALT[st.action][f];
+        if (alt && st[alt] !== undefined) continue;
         if (st[f] === undefined || st[f] === '') problems.push(`step ${i + 1} (${st.action}): "${f}" is required`);
       }
       if (st.action === 'scroll' && !st.selector && st.y === undefined && st.x === undefined) {
@@ -1427,6 +1553,11 @@ server.tool(
         problems.push(`step ${i + 1} (fill): use a {{password}} placeholder instead of a literal password`);
       }
     });
+    // Same client-side checks as the tool that will run it (evaluate cap, plan steps, live waits, length).
+    const pre = preflight(type === 'video' ? 'video' : 'sequence', params, { plan: await currentPlan() });
+    // An exported sequence may legitimately lack output steps (they are added in the builder).
+    const preErrors = type === 'video' ? pre.errors : pre.errors.filter((e) => !/output step/.test(e));
+    problems.push(...preErrors);
     if (problems.length) {
       return { content: [{ type: 'text', text: `Cannot export - fix these steps first:\n- ${problems.join('\n- ')}` }], isError: true };
     }
@@ -1455,6 +1586,8 @@ server.tool(
     lines.push('```json');
     lines.push(JSON.stringify(payload, null, 2));
     lines.push('```');
+    const preText = formatPreflight(pre);
+    if (preText) { lines.push(''); lines.push(preText); }
     return { content: [{ type: 'text', text: lines.join('\n') }] };
   }
 );
@@ -2014,9 +2147,11 @@ Call inspect_page on ${args.url} with blockBanners: true. Use the returned selec
 **Step 2 — Plan the steps**
 Based on the inspection and the description, plan 5–12 action steps. Rules:
 - Add a "note" field on every step EXCEPT wait/wait_for — notes create a guided-tour tooltip overlay.
-- After every click or navigate that loads new content, add a wait step with live: true (so the video captures the page actually loading, not a frozen blank frame). Example:
+- After a click or navigate that loads new content or starts an animation, add a wait step: the server records it live by default (use "live": false only for a deliberate still hold). Example:
   { "action": "click", "selector": "...", "note": "..." },
-  { "action": "wait", "ms": 1500, "live": true }
+  { "action": "wait", "ms": 1500 }
+- Canvas/WebGL/map content with no selector: click/hover with { "x": 640, "y": 360 } (viewport px) and highlight with { "rect": { "x", "y", "width", "height" } }.
+- Open with a { "action": "card", "title": "...", "subtitle": "..." } step when the demo needs a title, and finish with one for the call to action.
 - Do NOT pad with wait steps between steps that don't need load time — pace handles inter-step timing automatically.
 - Do NOT use zoom unless the user explicitly asked for it.
 - **Avoid opening dropdowns/menus/popovers** unless the demo is specifically about their contents — they stay open and obscure or misdirect later steps. Prefer navigating directly to the target URL (from the inspection) over clicking through a menu. The recording cannot re-check the page between steps, so a stuck-open overlay will break everything after it.
@@ -2037,6 +2172,7 @@ Write an audioGuide.script that matches the step count. Format:
    - darkMode: true (prevents white-background contrast issues with styled backgrounds)
    - blockBanners: true
    - cursor: { style: "classic", visible: true, persist: true }
+   - rehearse: true FIRST for anything with more than a few steps (1 API request per 10 steps, screenshot per step, no encode), fix what it reports (ok:false, visible:false), then render for real
    - clickEffect: { style: "ripple" }
    - audioGuide: { enabled: true, script: "[your script from Step 3]" }${frameConfig}${bgConfig}
 

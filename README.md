@@ -162,6 +162,8 @@ Execute multi-step browser automation.
 
 **Actions:** `navigate`, `click`, `dblclick`, `fill`, `select`, `hover`, `scroll`, `wait`, `wait_for`, `evaluate`, `press_key`, `screenshot`, `pdf`, `diff`
 
+**Limits:** steps per plan 20 Free/Hobby, 30 Starter, 50 Growth, 100 Scale; 5 outputs; 10 `evaluate` steps; 60 s total (+1.5 s per step above 20, cap 120 s). `wait` is a plain delay here (`live` is video-only); use `wait_for` to wait for readiness. Pre-flight warnings are appended to the result.
+
 **`observeAfterEachStep`** (optional, **free**): attaches a compact state snapshot (page type + top interactive elements + suggested actions, no screenshot) to each step result, so an agent can confirm what's on screen — e.g. that a dropdown opened — and pick the right selector for its next call without blind-batching.
 
 **Example prompts:**
@@ -201,7 +203,7 @@ Page-derived text (including `dom_text`) is always wrapped in `UNTRUSTED PAGE CO
 
 Build a sequence and get it back as JSON you can **edit and re-run**: paste it into the dashboard Sequence builder (*Import JSON*), change any step, highlight or narration, and run it again. Nothing is executed and no quota is used. Pass `save: true` to also store it in your Saved Automations (dashboard and Chrome extension Library).
 
-Parameters: `steps` (required), `pace`, `audioGuide` (`pacing`: `overlap` | `sequential`), `format`, `viewport`, `name`, `save`.
+Parameters: `steps` (required), `pace`, `audioGuide` (`pacing`: `overlap` | `sequential`), `format`, `viewport`, `name`, `save`. The same pre-flight checks as `record_video` run on the steps (evaluate cap, plan limits, static waits, estimated length).
 
 ### `import_agent_trace`
 
@@ -259,7 +261,49 @@ Record a professional demo video of a multi-step browser automation sequence wit
 - `blockBanners` — hide cookie consent popups (use on almost every recording)
 - `async` — render via an async job and poll to completion. Long recordings are enqueued (`202 { job_id }`) and this tool waits for the result, so they don't hit MCP client / API request timeouts. The async result is a **private hosted video URL** (its bytes can't be pulled back via the API key). Set `false` to force a single blocking synchronous request that returns the video **inline** (base64 embedded + saved to `saveTo`). **Default: `true`, except when you pass `saveTo`** (then the synchronous path is used so the file is actually produced on disk). Falls back to sync automatically if async is unavailable. **Quota is charged only on success; max 5 pending jobs per account.**
 - `pollTimeoutMs` — max time to wait for an async job (default: 240000 ≈ 4 min). If the render is still running when this elapses, the `job_id` is returned so you can check it later with `get_job`.
-- `saveTo` — output file path
+- `saveTo` — output file path. Missing parent folders are created; the path must be under the MCP server's working directory (or a folder listed in `PAGEBOLT_MCP_SAVE_ROOT`). The result gives the absolute path and the byte size read back from disk, and an unwritable path is rejected **before** the render is requested. It never reports "saved" when it was not.
+
+#### Getting a recording right the first time
+
+`record_video` and `run_sequence` run a free **client-side pre-flight** before sending the request. Errors stop the call (nothing is billed); warnings are appended to the result and the request is still sent.
+
+| Check | Level |
+|---|---|
+| more than 10 `evaluate` steps (server limit, 400 otherwise) | error |
+| authoring fields the server would 400: `output` not even / out of range / with `gif`, `audio.sampleRate` not 24000, 44100 or 48000, an `x`/`y` point outside the viewport or combined with `selector`, a `rect` outside the viewport or combined with `selector`, a `card` without `title`, `durationMs` outside 500-10000, a `highlight` `style` the server does not know | error |
+| `format: "gif"` with `audioGuide`; `run_sequence` with 0 or more than 5 output steps | error |
+| `saveTo` outside the allowed folders or not creatable | error (before the render) |
+| `wait` with an explicit `live: false` right after `click` / `dblclick` / `navigate` / `press_key` / `select` / `evaluate` (a static wait freezes **one** frame, so what the action started is not recorded; without the flag the server records it live) | warning |
+| step count or `format` above your plan (plan read once from `GET /api/v1/usage`, cached; skipped if unavailable) | warning |
+| estimated length above ~200 s, above your plan's video budget, or above the 5000-frame cap | warning, names the step where the render would stop |
+| `wait` × `pace` above 10 s; WebGPU in an `evaluate`; `narration` without `audioGuide.enabled`; `localhost` / private navigate URL | warning |
+
+The estimate sums waits, `pauseAfter`, highlight durations, a per-step base and narration at ~150 words per minute. It is accurate to roughly ±30 %.
+
+Limits worth knowing (from the PageBolt backend):
+
+| Plan | Video steps | Video budget (base + per step) | `run_sequence` steps |
+|---|---|---|---|
+| Free | 10 | 20 s + 5 s | 20 |
+| Hobby | 15 | 25 s + 5 s | 20 |
+| Starter | 20 | 30 s + 5 s | 30 |
+| Growth | 30 | 45 s + 6 s | 50 |
+| Scale | 50 | 60 s + 6 s | 100 |
+
+The per-step part is multiplied by `max(pace, 1)`. When the budget, ~240 s of wall clock or 5000 frames is reached the render **stops and drops the remaining steps without an error**, so check `Steps: N/M`. `evaluate` is capped at 10 per video or sequence. In a video it is recorded while its promise is pending (an async IIFE with `setTimeout` gaps or an `rAF` loop shows up on screen).
+
+Output size is `viewport × deviceScaleFactor`; `frame` adds a 40 px × dsf title bar and `background` adds 2 × `padding` (default 40) per axis, so 1440×900 with both is 1520×1020. Pass `output: {width, height, fit: "contain" | "cover"}` for an exact canvas such as 1920×1080 (even numbers, 320-3840 × 180-2160, not for gif). Narration audio is **48 kHz stereo** by default (AAC in mp4, Opus in webm); `audio: {sampleRate: 24000, channels: 1}` restores the old mono track. PageBolt's browsers have **no WebGPU** (and WebGL is software only), so a WebGPU app records its fallback path. The renderer is a cloud browser: the target must be a public HTTPS URL (see [docs/design/local-target-connector.md](docs/design/local-target-connector.md) for options to avoid a tunnel).
+
+**Authoring and quality parameters (PageBolt server `Video: first-time-right recordings`, pagebolt#144; older backends reject unknown fields).**
+- Targets without a selector: `x` / `y` (viewport CSS px) on `click` / `dblclick` / `hover`, and `rect: {x, y, width, height}` on `highlight`. Give a selector **or** a point/rect, not both.
+- `card` step: `title` (required), `subtitle`, `footer`, `theme {background, foreground, accent, fontFamily}`, `durationMs` (500-10000, default 3000, not pace-scaled; it stays up for its narration), optional `narration`.
+- Highlight styles `focus` (default when narrated), `ring`, `glide` (put consecutive glide highlights in a row), plus `camera`, `exactDuration`, `requireVisible`. A highlight lasts at least as long as its narration clip unless `exactDuration: true`.
+- Narration starts with the first visual frame of its step. `audioGuide.pronunciations` (`{"word": "alias"}` or `{"word": {"ipa": "..."}}`) and `speakYears`; `AI` is spoken "A.I." by default.
+- `wait` is captured **live by default** after click / dblclick / navigate / press_key / select / evaluate (a ~300 ms probe decides elsewhere); `live: false` is the only way to get a one-frame hold.
+- `rehearse: true` calls `POST /api/v1/video/rehearse`: the real step code at fast pace, nothing encoded or spoken, **1 API request per 10 steps** (a recording costs 3). The tool returns per step `ok` / `error` / `visible` / the resolved element box plus a 640 px screenshot as an image. `screenshots: false` makes it a flat 1 request.
+- `step_thumbnails: true` adds one small JPEG per step to a real render; the tool returns them as images.
+
+**Verify the render.** `Steps: N/N completed` only means no step errored. The result also lists steps that failed, were skipped, were cut by the budget, had a target nobody can see (`visible: false`, nothing drawn), or produced no visual change, plus the server's single `warnings[]` (`step_results[].start_s/end_s/frames_captured/changed/live/visible/narration_start_s`, `stopped_early` / `stopped_at_step` / `stop_reason`, `budget.effective_timeout_ms`). The cheapest check is `rehearse: true`. Hosted async videos are private and cannot be downloaded with the API key.
 
 **Example prompts:**
 - "Record a video of logging into https://example.com with a spotlight cursor"
@@ -279,13 +323,13 @@ Never guess CSS selectors. Call `inspect_page` on the target URL before building
 2. record_video(steps using selectors from step 1, ...)
 ```
 
-**2. Use `live: true` on wait steps after clicks and navigations**
+**2. Add a wait after clicks and navigations (it is live by default)**
 
-After a click or navigate, content loads asynchronously. `live: false` (the default) freezes a single frame immediately — before anything renders. Set `live: true` on any wait step that follows an interaction so the video captures the actual page loading.
+After a click or navigate, content loads asynchronously. The server records a wait that follows click / dblclick / navigate / press_key / select / evaluate in real time, so the video captures the page loading; only an explicit `live: false` freezes a single frame.
 
 ```json
 { "action": "click", "selector": "#submit-btn", "note": "Submitting the form" },
-{ "action": "wait", "ms": 2000, "live": true }
+{ "action": "wait", "ms": 2000 }
 ```
 
 **3. Use `darkMode: true` for light-background sites**
@@ -299,8 +343,8 @@ If the target site has a white or very light background, it will clash with grad
 | Use case | What to do |
 |----------|-----------|
 | Natural pacing between steps | Set `pace: "slow"` or `pace: "dramatic"` |
-| Page needs to load after click | `{ action: "wait", ms: 1500, live: true }` |
-| Hold on a view for narration | `{ action: "wait", ms: 3000, live: true }` |
+| Page needs to load after click | `{ action: "wait", ms: 1500 }` |
+| Hold on a still view | `{ action: "wait", ms: 3000, live: false }` |
 
 **5. Write an outro in the narration script**
 
@@ -428,6 +472,8 @@ The full PageBolt API reference as a text resource. AI agents that support MCP r
 |---------------------|----------|---------|-------------|
 | `PAGEBOLT_API_KEY` | **Yes** | — | Your PageBolt API key ([get one free](https://pagebolt.dev)) |
 | `PAGEBOLT_BASE_URL` | No | `https://pagebolt.dev` | API base URL |
+| `PAGEBOLT_MCP_SAVE_ROOT` | No | — | Extra folder(s) `saveTo` may write under, in addition to the server's working directory (path-delimiter separated) |
+| `PAGEBOLT_MCP_NO_PLAN_LOOKUP` | No | — | Set to `1` to skip the cached `GET /api/v1/usage` call used to sharpen pre-flight warnings |
 
 ---
 
