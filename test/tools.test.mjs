@@ -6,7 +6,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -15,6 +15,10 @@ import { join } from 'node:path';
 process.env.PAGEBOLT_MCP_NO_AUTOSTART = '1';
 process.env.PAGEBOLT_API_KEY = 'pf_test_key';
 process.env.PAGEBOLT_BASE_URL = 'https://pagebolt.dev';
+// saveTo is confined to CWD or this root; tests write under the OS temp dir.
+process.env.PAGEBOLT_MCP_SAVE_ROOT = tmpdir();
+// Tests that don't exercise the plan lookup must not issue an extra /usage call.
+process.env.PAGEBOLT_MCP_NO_PLAN_LOOKUP = '1';
 
 const { createSandboxServer } = await import('../src/index.mjs');
 const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
@@ -653,5 +657,228 @@ test('export_sequence save:true stores it in the library via /api/v1/sequences',
     assert.match(res.content[0].text, /seq_1/);
     assert.equal(seen.type, 'video');
     assert.equal(seen.name, 'Saved one');
+  });
+});
+
+// ── First-time-right: pre-flight, saveTo, evidence (integration) ──────────
+const okVideo = (extra = {}) => jsonResponse({
+  data: Buffer.from('VIDEO-BYTES').toString('base64'), format: 'mp4', size_bytes: 11, duration_ms: 9000,
+  steps_completed: 2, total_steps: 2, usage: { video_cost: 3, remaining: 90 }, ...extra,
+});
+
+test('record_video with 3 evaluate steps is rejected client-side: no HTTP call, not billed', async () => {
+  let calls = 0;
+  await withClient(() => { calls++; return okVideo(); }, async (client) => {
+    const ev = { action: 'evaluate', script: '1' };
+    const res = await client.callTool({ name: 'record_video', arguments: { steps: [{ action: 'navigate', url: 'https://example.com' }, ev, ev, ev], async: false } });
+    assert.equal(res.isError, true);
+    assert.match(textOf(res), /Not sent \(nothing was billed\)/);
+    assert.match(textOf(res), /3 evaluate steps.*at most 2/);
+  });
+  assert.equal(calls, 0);
+});
+
+test('record_video: non-live wait after click is sent, with a warning + estimate in the result', async () => {
+  let sent;
+  await withClient((url, method, body) => { sent = body; return okVideo(); }, async (client) => {
+    const res = await client.callTool({
+      name: 'record_video',
+      arguments: {
+        async: false, saveTo: join(tmpdir(), 'pb-warn-test', 'v.mp4'),
+        steps: [{ action: 'navigate', url: 'https://example.com' }, { action: 'click', selector: '#go' }, { action: 'wait', ms: 3000 }],
+      },
+    });
+    assert.notEqual(res.isError, true, textOf(res));
+    const text = textOf(res);
+    assert.match(text, /Pre-flight warnings \(1, request was still sent\)/);
+    assert.match(text, /step 2 is a wait right after click without live:true/);
+    assert.match(text, /Pre-flight estimate: ~\d+ s of video/);
+  });
+  assert.equal(sent.steps.length, 3, 'request is still sent unchanged');
+  rmSync(join(tmpdir(), 'pb-warn-test'), { recursive: true, force: true });
+});
+
+test('record_video: clean request gets only the one-line estimate, no warnings', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'pagebolt-'));
+  try {
+    await withClient(() => okVideo(), async (client) => {
+      const res = await client.callTool({ name: 'record_video', arguments: { async: false, saveTo: join(tmp, 'v.mp4'), steps: [{ action: 'navigate', url: 'https://example.com' }] } });
+      assert.match(textOf(res), /Pre-flight estimate: ~\d+ s of video\./);
+      assert.doesNotMatch(textOf(res), /Pre-flight warnings/);
+    });
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('record_video saveTo creates missing parent folders and reports absolute path + bytes', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'pagebolt-'));
+  const out = join(tmp, 'deep', 'er', 'rec.mp4');
+  try {
+    await withClient(() => okVideo(), async (client) => {
+      const res = await client.callTool({ name: 'record_video', arguments: { async: false, saveTo: out, steps: [{ action: 'navigate', url: 'https://example.com' }] } });
+      assert.notEqual(res.isError, true, textOf(res));
+      assert.match(textOf(res), new RegExp(`File:\\s+${out.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')} \\(11 bytes\\)`));
+    });
+    assert.ok(existsSync(out));
+    assert.equal(statSync(out).size, 11);
+    assert.equal(readFileSync(out, 'utf8'), 'VIDEO-BYTES');
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('record_video saveTo that cannot be honoured fails BEFORE the render is requested', async () => {
+  let calls = 0;
+  await withClient(() => { calls++; return okVideo(); }, async (client) => {
+    const res = await client.callTool({ name: 'record_video', arguments: { async: false, saveTo: '/etc/pagebolt-nope/v.mp4', steps: [{ action: 'navigate', url: 'https://example.com' }] } });
+    assert.equal(res.isError, true);
+    assert.match(textOf(res), /Not sent \(nothing was billed\)/);
+    assert.match(textOf(res), /outside the allowed folder.*PAGEBOLT_MCP_SAVE_ROOT/s);
+    assert.equal((res.content || []).find((c) => c.type === 'resource'), undefined);
+  });
+  assert.equal(calls, 0);
+  assert.equal(existsSync('/etc/pagebolt-nope'), false);
+});
+
+test('record_video async hosted + saveTo that cannot be downloaded says NOT SAVED (never "saved")', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'pagebolt-'));
+  const out = join(tmp, 'x', 'rec.mp4');
+  try {
+    await withClient((url, method) => {
+      if (url.endsWith('/api/v1/video')) return jsonResponse({ job_id: 'j1' }, { status: 202 });
+      if (url.endsWith('/api/v1/jobs/j1')) return jsonResponse({ id: 'j1', status: 'completed', output: { format: 'mp4', duration_ms: 5000, url: 'https://pagebolt.dev/v/j1', file_url: 'https://pagebolt.dev/v/j1/file' } });
+      if (url.endsWith('/v/j1/file')) return jsonResponse({}, { status: 401 });
+      throw new Error(`unexpected ${method} ${url}`);
+    }, async (client) => {
+      const res = await client.callTool({ name: 'record_video', arguments: { async: true, saveTo: out, steps: [{ action: 'navigate', url: 'https://example.com' }] } });
+      const text = textOf(res);
+      assert.match(text, /File:\s+NOT SAVED/);
+      assert.match(text, /private and could not be downloaded/);
+      assert.match(text, /Watch:\s+https:\/\/pagebolt\.dev\/v\/j1/);
+    });
+    assert.equal(existsSync(out), false);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('record_video renders per-step evidence, stop reason and warnings when the backend sends them', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'pagebolt-'));
+  try {
+    await withClient(() => okVideo({
+      steps_completed: 2, total_steps: 3, stopped_early: true, stopped_at_step: 2, reason: 'video budget reached (28 s)', effective_timeout_ms: 30000,
+      warnings: ['wait at step 1 had no visual change'],
+      step_results: [
+        { step_index: 0, action: 'navigate', status: 'ok', start_s: 0, end_s: 1.2, changed: true },
+        { step_index: 1, action: 'wait', status: 'ok', start_s: 1.2, end_s: 6.2, changed: false, change_pct: 0 },
+        { step_index: 2, action: 'click', status: 'timeout', error: 'budget' },
+      ],
+    }), async (client) => {
+      const res = await client.callTool({ name: 'record_video', arguments: { async: false, saveTo: join(tmp, 'v.mp4'), steps: [
+        { action: 'navigate', url: 'https://example.com' }, { action: 'wait', ms: 5000, live: true }, { action: 'click', selector: '#x' },
+      ] } });
+      const text = textOf(res);
+      assert.match(text, /STOPPED EARLY at step 2: video budget reached/);
+      assert.match(text, /Step 1 wait 5\.0 s live @1\.2 s-6\.2 s: no visual change/);
+      assert.match(text, /Step 2 click #x: NOT RUN \(budget\)/);
+      assert.match(text, /INCOMPLETE: 2\/3/);
+      assert.match(text, /Server warnings \(1\)/);
+    });
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('record_video with an old backend response (no new fields) keeps the original output and adds one honest note', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'pagebolt-'));
+  try {
+    await withClient(() => okVideo(), async (client) => {
+      const text = textOf(await client.callTool({ name: 'record_video', arguments: { async: false, saveTo: join(tmp, 'v.mp4'), steps: [{ action: 'navigate', url: 'https://example.com' }] } }));
+      assert.match(text, /Video recorded successfully\./);
+      assert.match(text, /Steps:\s+2\/2 completed/);
+      assert.doesNotMatch(text, /STOPPED EARLY|Step evidence|INCOMPLETE/);
+      assert.match(text, /means no step errored, not that anything moved/);
+      assert.match(text, /Output:\s+~1280x720/);
+    });
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('record_video output line uses backend width/height when given', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'pagebolt-'));
+  try {
+    await withClient(() => okVideo({ width: 1512, height: 1012 }), async (client) => {
+      const text = textOf(await client.callTool({ name: 'record_video', arguments: { async: false, saveTo: join(tmp, 'v.mp4'), steps: [{ action: 'navigate', url: 'https://example.com' }] } }));
+      assert.match(text, /Output:\s+1512x1012\n/);
+    });
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('plan lookup: free plan + 12 steps warns once from /usage, which is called a single time', async () => {
+  const prev = process.env.PAGEBOLT_MCP_NO_PLAN_LOOKUP;
+  delete process.env.PAGEBOLT_MCP_NO_PLAN_LOOKUP;
+  const { resetPlanCache } = await import('../src/lib/plan.mjs');
+  resetPlanCache();
+  let usageCalls = 0;
+  const tmp = mkdtempSync(join(tmpdir(), 'pagebolt-'));
+  try {
+    await withClient((url) => {
+      if (url.endsWith('/api/v1/usage')) { usageCalls++; return jsonResponse({ plan: 'free', usage: { current: 1, limit: 100, remaining: 99 } }); }
+      return okVideo();
+    }, async (client) => {
+      const steps = Array.from({ length: 12 }, () => ({ action: 'navigate', url: 'https://example.com' }));
+      const args = { async: false, saveTo: join(tmp, 'v.mp4'), steps };
+      assert.match(textOf(await client.callTool({ name: 'record_video', arguments: args })), /exceeds the 10-step limit of the free plan/);
+      await client.callTool({ name: 'record_video', arguments: args });
+    });
+    assert.equal(usageCalls, 1);
+  } finally {
+    process.env.PAGEBOLT_MCP_NO_PLAN_LOOKUP = prev ?? '1';
+    resetPlanCache();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('run_sequence: 3 evaluate steps rejected client-side; warnings are appended on success', async () => {
+  let calls = 0;
+  await withClient(() => { calls++; return jsonResponse({ outputs: [], step_results: [], steps_completed: 3, total_steps: 3, total_duration_ms: 1, usage: { outputs_charged: 1, remaining: 9 } }); }, async (client) => {
+    const ev = { action: 'evaluate', script: '1' };
+    const bad = await client.callTool({ name: 'run_sequence', arguments: { steps: [{ action: 'navigate', url: 'https://example.com' }, ev, ev, ev, { action: 'screenshot' }] } });
+    assert.equal(bad.isError, true);
+    assert.match(textOf(bad), /3 evaluate steps/);
+    assert.equal(calls, 0);
+    const none = await client.callTool({ name: 'run_sequence', arguments: { steps: [{ action: 'navigate', url: 'https://example.com' }] } });
+    assert.equal(none.isError, true);
+    assert.match(textOf(none), /at least one output step/);
+    const warn = await client.callTool({ name: 'run_sequence', arguments: { steps: [{ action: 'navigate', url: 'https://example.com' }, { action: 'click', selector: '#a' }, { action: 'wait', ms: 500 }, { action: 'screenshot', name: 's' }] } });
+    assert.notEqual(warn.isError, true);
+    assert.match(textOf(warn), /Sequence complete/);
+    assert.match(textOf(warn), /Pre-flight warnings/);
+  });
+});
+
+test('tool descriptions state the rules agents kept learning from 400s', async () => {
+  await withClient(() => jsonResponse({}), async (client) => {
+    const { tools } = await client.listTools();
+    const d = Object.fromEntries(tools.map((t) => [t.name, t.description]));
+    assert.match(d.record_video, /live:true/);
+    assert.match(d.record_video, /Max 2 evaluate steps/);
+    assert.match(d.record_video, /Free 10 \/ 20 s \+ 5 s/);
+    assert.match(d.record_video, /no WebGPU/);
+    assert.match(d.record_video, /24 kHz/);
+    assert.match(d.record_video, /1520x1020/);
+    assert.match(d.record_video, /saveTo creates missing parent folders/);
+    assert.match(d.run_sequence, /max 2 evaluate steps/);
+    assert.match(d.run_sequence, /wait_for/);
+    assert.match(d.inspect_page, /no WebGPU/);
+    assert.match(d.take_screenshot, /no WebGPU/);
+    assert.match(d.export_sequence, /pre-flight warnings/i);
+    const vsteps = tools.find((t) => t.name === 'record_video').inputSchema.properties.steps.items.properties;
+    assert.match(vsteps.live.description, /freezes ONE frame/);
+    assert.match(vsteps.script.description, /Max 2 evaluate/);
+  });
+});
+
+test('export_sequence reports pre-flight warnings and refuses 3 evaluate steps', async () => {
+  await withClient(async () => jsonResponse({}), async (client) => {
+    const ev = { action: 'evaluate', script: '1' };
+    const bad = await client.callTool({ name: 'export_sequence', arguments: { name: 'x', steps: [ev, ev, ev] } });
+    assert.equal(bad.isError, true);
+    assert.match(bad.content[0].text, /3 evaluate steps/);
+    const ok = await client.callTool({ name: 'export_sequence', arguments: { name: 'x', steps: [{ action: 'navigate', url: 'https://example.com' }, { action: 'click', selector: '#a' }, { action: 'wait', ms: 2000 }] } });
+    assert.notEqual(ok.isError, true);
+    assert.match(ok.content[0].text, /Pre-flight warnings/);
   });
 });
