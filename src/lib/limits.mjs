@@ -7,10 +7,12 @@
 //   - warnings: everything else, including plan-table checks (the table below is
 //     a client-side copy and may lag the server, so it never blocks a request).
 // Constants are copied from pagebolt src/config.js (videoLimits, sequenceLimits)
-// and src/services/{video,sequence,highlight,narrationPacing}.js. Keep them in
-// sync; the plan table is only a fallback when the plan cannot be looked up.
+// and src/services/{video,sequence,highlight,narrationPacing}.js plus
+// src/services/videoAuthoring/{targets,card,output}.js (coordinate targets, card
+// step, output canvas, audio format). Keep them in sync; the plan table is only a
+// fallback when the plan cannot be looked up.
 
-export const MAX_EVALUATE_STEPS = 2;
+export const MAX_EVALUATE_STEPS = 10;
 export const MAX_WAIT_MS = 10_000;
 export const MAX_SEQUENCE_OUTPUTS = 5;
 export const MAX_FRAMES = 5000;
@@ -21,6 +23,10 @@ const NARRATION_WPM = 150;
 const NARRATION_GAP_S = 0.25;
 const TAIL_HOLD_S = 0.4;
 const BUDGET_STOP_MARGIN_S = 2;
+const MAX_NARRATED_HOLD_S = 40;
+// Actions after which the server records a wait live by default (videoEvidence.js LIVE_WAIT_AFTER).
+const LIVE_WAIT_AFTER = ['click', 'dblclick', 'navigate', 'press_key', 'select', 'evaluate'];
+const CARD_DEFAULT_S = 3;
 
 // plan -> { videoSteps, baseMs, perStepMs, formats, sequenceSteps }
 export const PLAN_LIMITS = {
@@ -54,8 +60,9 @@ const narrationSeconds = (text, speed) => (wordCount(text) / NARRATION_WPM) * 60
 // a note to be read, never shorter than the spoken narration.
 function highlightSeconds(step, pace, narrationS) {
   const base = ((step.duration || 3500) * pace) / 1000;
-  const spoken = narrationS > 0 ? Math.min(narrationS + 0.3, 6) : 0;
-  let hold = Math.max(base, spoken);
+  // A narrated highlight lasts at least as long as its clip (cap 40 s) unless exactDuration:true.
+  const spoken = narrationS > 0 ? Math.min(narrationS + 0.3, MAX_NARRATED_HOLD_S) : 0;
+  let hold = step.exactDuration === true && step.duration ? base : Math.max(base, spoken);
   if (step.note) {
     const read = Math.max(2000, Math.min(6000, String(step.note).length * 50));
     hold = Math.max(hold, ((read + 1200) * pace) / 1000);
@@ -83,7 +90,8 @@ function stepSeconds(step, pace, narrationS) {
     case 'wait_for': return 0.2;
     case 'evaluate': return 0.1;
     case 'highlight': return highlightSeconds(step, pace, narrationS);
-    case 'card': return ((step.duration || 3000) * pace) / 1000;
+    // card: durationMs (default 3000, NOT pace-scaled), extended to the narration length + 0.4 s
+    case 'card': return Math.max(typeof step.durationMs === 'number' ? step.durationMs / 1000 : CARD_DEFAULT_S, narrationS > 0 ? Math.min(narrationS + 0.4, 20) : 0) + 0.35;
     default: return 0;
   }
 }
@@ -125,6 +133,75 @@ function planBudgetSeconds(plan, stepCount, pace) {
 
 const fmtS = (s) => `${Math.round(s)} s`;
 
+// ── Authoring validation: mirrors pagebolt src/services/videoAuthoring/{targets,card,output}.js and
+// highlight.js. The server answers 400 to all of these, so they are errors (nothing is billed). ──
+const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
+const isHex = (s) => typeof s === 'string' && /^#[0-9A-Fa-f]{6}$/.test(s);
+export const HIGHLIGHT_STYLES = ['outline', 'pulse', 'glow', 'spotlight', 'arrow', 'focus', 'ring', 'glide'];
+export const OUTPUT_LIMITS = { minWidth: 320, maxWidth: 3840, minHeight: 180, maxHeight: 2160, fits: ['contain', 'cover'] };
+export const AUDIO_SAMPLE_RATES = [24000, 44100, 48000];
+
+export function authoringErrors(params) {
+  const errs = [];
+  const vp = params.viewport || {};
+  const vw = Math.min(Math.max(vp.width || 1280, 320), 3840);
+  const vh = Math.min(Math.max(vp.height || 720, 200), 2160);
+  const format = params.format || 'mp4';
+
+  if (params.output !== undefined) {
+    const o = params.output;
+    if (format === 'gif') errs.push('output is not supported for format "gif" (use mp4 or webm; gif size is controlled with gifOptions).');
+    else if (!o || typeof o !== 'object') errs.push('output must be an object {width, height, fit?}.');
+    else {
+      if (!Number.isInteger(o.width) || o.width < OUTPUT_LIMITS.minWidth || o.width > OUTPUT_LIMITS.maxWidth) errs.push(`output.width must be an integer ${OUTPUT_LIMITS.minWidth}-${OUTPUT_LIMITS.maxWidth}.`);
+      if (!Number.isInteger(o.height) || o.height < OUTPUT_LIMITS.minHeight || o.height > OUTPUT_LIMITS.maxHeight) errs.push(`output.height must be an integer ${OUTPUT_LIMITS.minHeight}-${OUTPUT_LIMITS.maxHeight}.`);
+      if ((Number.isInteger(o.width) && o.width % 2) || (Number.isInteger(o.height) && o.height % 2)) errs.push('output.width and output.height must be even numbers (H.264/VP9).');
+      if (o.fit !== undefined && !OUTPUT_LIMITS.fits.includes(o.fit)) errs.push(`output.fit must be one of: ${OUTPUT_LIMITS.fits.join(', ')}.`);
+    }
+  }
+  if (params.audio !== undefined) {
+    const a = params.audio;
+    if (!a || typeof a !== 'object') errs.push('audio must be an object {sampleRate?, channels?}.');
+    else {
+      if (a.sampleRate !== undefined && !AUDIO_SAMPLE_RATES.includes(a.sampleRate)) errs.push(`audio.sampleRate must be one of: ${AUDIO_SAMPLE_RATES.join(', ')}.`);
+      if (a.channels !== undefined && ![1, 2].includes(a.channels)) errs.push('audio.channels must be 1 (mono) or 2 (stereo).');
+    }
+  }
+
+  (params.steps || []).forEach((s, i) => {
+    const at = `step ${i}`;
+    if (['click', 'dblclick', 'hover'].includes(s.action)) {
+      const hasPoint = s.x !== undefined || s.y !== undefined;
+      if (hasPoint) {
+        if (s.selector) errs.push(`${at} (${s.action}): give either "selector" or the x/y point, not both.`);
+        else if (!isNum(s.x) || !isNum(s.y)) errs.push(`${at} (${s.action}): a point needs numeric x and y (viewport CSS pixels).`);
+        else if (s.x < 0 || s.y < 0 || s.x >= vw || s.y >= vh) errs.push(`${at} (${s.action}): point (${s.x}, ${s.y}) is outside the ${vw}x${vh} viewport.`);
+      } else if (!s.selector) {
+        errs.push(`${at} (${s.action}): needs a "selector" or an x/y point.`);
+      }
+    }
+    if (s.action === 'highlight') {
+      if (s.rect !== undefined) {
+        const r = s.rect;
+        if (s.selector) errs.push(`${at} (highlight): give either "selector" or "rect", not both.`);
+        else if (!r || ![r.x, r.y, r.width, r.height].every(isNum) || r.width <= 0 || r.height <= 0) errs.push(`${at} (highlight): rect needs numeric x, y and positive width, height.`);
+        else if (r.x < 0 || r.y < 0 || r.x + r.width > vw || r.y + r.height > vh) errs.push(`${at} (highlight): rect must lie inside the ${vw}x${vh} viewport.`);
+      } else if (!s.selector) {
+        errs.push(`${at} (highlight): needs a "selector" or a "rect".`);
+      }
+      if (s.style !== undefined && !HIGHLIGHT_STYLES.includes(s.style)) errs.push(`${at} (highlight): style must be one of: ${HIGHLIGHT_STYLES.join(', ')}.`);
+    }
+    if (s.action === 'card') {
+      if (typeof s.title !== 'string' || !s.title.trim()) errs.push(`${at} (card): needs a non-empty "title".`);
+      if (s.durationMs !== undefined && (!isNum(s.durationMs) || s.durationMs < 500 || s.durationMs > 10000)) errs.push(`${at} (card): durationMs must be 500-10000.`);
+      if (s.theme && typeof s.theme === 'object') {
+        for (const k of ['background', 'foreground', 'accent']) if (s.theme[k] !== undefined && !isHex(s.theme[k])) errs.push(`${at} (card): theme.${k} must be a #RRGGBB hex colour.`);
+      }
+    }
+  });
+  return errs;
+}
+
 /**
  * Validate a record_video / run_sequence request.
  * @param {'video'|'sequence'} kind
@@ -145,7 +222,7 @@ export function preflight(kind, params, ctx = {}) {
   if (evalIdx.length > MAX_EVALUATE_STEPS) {
     errors.push(
       `${evalIdx.length} evaluate steps (at ${evalIdx.map(label).join(', ')}) but PageBolt allows at most ${MAX_EVALUATE_STEPS} per ${kind}. ` +
-      'Fold the page actions into ONE async IIFE with setTimeout gaps, or expose hooks from the app and drive them from a single evaluate.',
+      'Merge the scripts into fewer evaluate steps (an async IIFE with setTimeout gaps works).',
     );
   }
 
@@ -158,6 +235,7 @@ export function preflight(kind, params, ctx = {}) {
   }
 
   if (kind === 'video') {
+    errors.push(...authoringErrors(params));
     const format = params.format || 'mp4';
     if (lim && !lim.formats.includes(format)) {
       warnings.push(`format "${format}" is not available on the ${plan} plan (allowed: ${lim.formats.join(', ')}); the server will most likely reject it.`);
@@ -171,17 +249,26 @@ export function preflight(kind, params, ctx = {}) {
     if (outputs > MAX_SEQUENCE_OUTPUTS) errors.push(`${outputs} output steps; the maximum is ${MAX_SEQUENCE_OUTPUTS} per sequence.`);
   }
 
-  // ── warnings: wait without live:true right after something that animates ──
+  // ── warnings: wait that is explicitly static right after something that animates ──
+  // The server captures a wait LIVE by default after click/dblclick/navigate/press_key/select/evaluate
+  // (and probes ~300 ms elsewhere). Only an explicit live:false forces a one-frame hold.
   steps.forEach((s, i) => {
-    if (s.action !== 'wait' || s.live || i === 0) return;
+    if (kind === 'video') {
+      if (s.action !== 'wait' || s.live !== false || i === 0) return;
+      const prev = steps[i - 1];
+      if (LIVE_WAIT_AFTER.includes(prev.action)) {
+        warnings.push(
+          `${label(i)} is a wait with live:false right after ${prev.action}. A static wait freezes ONE frame for its whole length, ` +
+          `so anything the ${prev.action} started (animation, video, canvas, loading) will NOT be captured. Remove live:false to record it in real time.`,
+        );
+      }
+      return;
+    }
+    // run_sequence: a wait is just a delay
+    if (s.action !== 'wait' || i === 0) return;
     const prev = steps[i - 1];
     if (['click', 'dblclick', 'navigate', 'evaluate'].includes(prev.action)) {
-      warnings.push(
-        `${label(i)} is a wait right after ${prev.action}` + (kind === 'video' ? ' without live:true. ' : '. ') +
-        (kind === 'video'
-          ? 'A non-live wait freezes ONE frame for its whole length, so any animation, video, canvas or loading state that follows the ' + prev.action + ' will NOT be captured. Add live:true to record it in real time (or delete the wait if you only wanted a pause).'
-          : 'In run_sequence a wait is just a delay; use wait_for with a selector if you need the page to be ready.'),
-      );
+      warnings.push(`${label(i)} is a wait right after ${prev.action}. In run_sequence a wait is just a delay; use wait_for with a selector if you need the page to be ready.`);
     }
   });
 
@@ -190,9 +277,6 @@ export function preflight(kind, params, ctx = {}) {
     steps.forEach((s, i) => {
       if (s.action === 'wait' && s.ms && s.ms * pace > MAX_WAIT_MS) {
         warnings.push(`${label(i)}: wait ${s.ms} ms x pace ${pace} = ${Math.round(s.ms * pace)} ms, capped at ${MAX_WAIT_MS} ms by the server.`);
-      }
-      if (s.action === 'evaluate') {
-        warnings.push(`${label(i)} (evaluate): the script runs but its own time is not recorded as motion. Anything it starts (timers, animation) only shows up if a live:true wait follows it.`);
       }
       if (s.action === 'evaluate' && /navigator\s*\.\s*gpu|requestAdapter|webgpu/i.test(s.script || '')) {
         warnings.push(`${label(i)} (evaluate) references WebGPU. PageBolt's browsers have no WebGPU; the page will take its fallback path on camera.`);

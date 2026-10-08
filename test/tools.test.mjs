@@ -666,32 +666,45 @@ const okVideo = (extra = {}) => jsonResponse({
   steps_completed: 2, total_steps: 2, usage: { video_cost: 3, remaining: 90 }, ...extra,
 });
 
-test('record_video with 3 evaluate steps is rejected client-side: no HTTP call, not billed', async () => {
+test('record_video with 11 evaluate steps is rejected client-side: no HTTP call, not billed', async () => {
   let calls = 0;
   await withClient(() => { calls++; return okVideo(); }, async (client) => {
     const ev = { action: 'evaluate', script: '1' };
-    const res = await client.callTool({ name: 'record_video', arguments: { steps: [{ action: 'navigate', url: 'https://example.com' }, ev, ev, ev], async: false } });
+    const res = await client.callTool({ name: 'record_video', arguments: { steps: [{ action: 'navigate', url: 'https://example.com' }, ...Array.from({ length: 11 }, () => ev)], async: false } });
     assert.equal(res.isError, true);
     assert.match(textOf(res), /Not sent \(nothing was billed\)/);
-    assert.match(textOf(res), /3 evaluate steps.*at most 2/);
+    assert.match(textOf(res), /11 evaluate steps.*at most 10/);
   });
   assert.equal(calls, 0);
 });
 
-test('record_video: non-live wait after click is sent, with a warning + estimate in the result', async () => {
+test('record_video with 10 evaluate steps is sent (the server allows 10)', async () => {
+  let calls = 0;
+  const tmp = mkdtempSync(join(tmpdir(), 'pagebolt-'));
+  try {
+    await withClient(() => { calls++; return okVideo(); }, async (client) => {
+      const ev = { action: 'evaluate', script: '1' };
+      const res = await client.callTool({ name: 'record_video', arguments: { async: false, saveTo: join(tmp, 'v.mp4'), steps: [{ action: 'navigate', url: 'https://example.com' }, ...Array.from({ length: 10 }, () => ev)] } });
+      assert.notEqual(res.isError, true, textOf(res));
+    });
+    assert.equal(calls, 1);
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('record_video: live:false wait after click is sent, with a warning + estimate in the result', async () => {
   let sent;
   await withClient((url, method, body) => { sent = body; return okVideo(); }, async (client) => {
     const res = await client.callTool({
       name: 'record_video',
       arguments: {
         async: false, saveTo: join(tmpdir(), 'pb-warn-test', 'v.mp4'),
-        steps: [{ action: 'navigate', url: 'https://example.com' }, { action: 'click', selector: '#go' }, { action: 'wait', ms: 3000 }],
+        steps: [{ action: 'navigate', url: 'https://example.com' }, { action: 'click', selector: '#go' }, { action: 'wait', ms: 3000, live: false }],
       },
     });
     assert.notEqual(res.isError, true, textOf(res));
     const text = textOf(res);
     assert.match(text, /Pre-flight warnings \(1, request was still sent\)/);
-    assert.match(text, /step 2 is a wait right after click without live:true/);
+    assert.match(text, /step 2 is a wait with live:false right after click/);
     assert.match(text, /Pre-flight estimate: ~\d+ s of video/);
   });
   assert.equal(sent.steps.length, 3, 'request is still sent unchanged');
@@ -831,13 +844,13 @@ test('plan lookup: free plan + 12 steps warns once from /usage, which is called 
   }
 });
 
-test('run_sequence: 3 evaluate steps rejected client-side; warnings are appended on success', async () => {
+test('run_sequence: 11 evaluate steps rejected client-side; warnings are appended on success', async () => {
   let calls = 0;
   await withClient(() => { calls++; return jsonResponse({ outputs: [], step_results: [], steps_completed: 3, total_steps: 3, total_duration_ms: 1, usage: { outputs_charged: 1, remaining: 9 } }); }, async (client) => {
     const ev = { action: 'evaluate', script: '1' };
-    const bad = await client.callTool({ name: 'run_sequence', arguments: { steps: [{ action: 'navigate', url: 'https://example.com' }, ev, ev, ev, { action: 'screenshot' }] } });
+    const bad = await client.callTool({ name: 'run_sequence', arguments: { steps: [{ action: 'navigate', url: 'https://example.com' }, ...Array.from({ length: 11 }, () => ev), { action: 'screenshot' }] } });
     assert.equal(bad.isError, true);
-    assert.match(textOf(bad), /3 evaluate steps/);
+    assert.match(textOf(bad), /11 evaluate steps/);
     assert.equal(calls, 0);
     const none = await client.callTool({ name: 'run_sequence', arguments: { steps: [{ action: 'navigate', url: 'https://example.com' }] } });
     assert.equal(none.isError, true);
@@ -853,38 +866,51 @@ test('tool descriptions state the rules agents kept learning from 400s', async (
   await withClient(() => jsonResponse({}), async (client) => {
     const { tools } = await client.listTools();
     const d = Object.fromEntries(tools.map((t) => [t.name, t.description]));
-    assert.match(d.record_video, /live:true/);
-    assert.match(d.record_video, /Max 2 evaluate steps/);
+    assert.match(d.record_video, /captured LIVE by default/);
+    assert.match(d.record_video, /live:false/);
+    assert.match(d.record_video, /Max 10 evaluate steps/);
+    assert.match(d.record_video, /IS recorded while its promise is pending/);
+    assert.doesNotMatch(d.record_video, /evaluate itself is not recorded|Max 2 evaluate/);
     assert.match(d.record_video, /Free 10 \/ 20 s \+ 5 s/);
     assert.match(d.record_video, /no WebGPU/);
-    assert.match(d.record_video, /24 kHz/);
+    assert.match(d.record_video, /48 kHz stereo by default/);
+    assert.doesNotMatch(d.record_video, /mono 24 kHz/);
     assert.match(d.record_video, /1520x1020/);
+    assert.match(d.record_video, /output:\{width,height,fit/);
+    assert.match(d.record_video, /rehearse:true \(POST \/video\/rehearse: 1 API request per 10 steps/);
     assert.match(d.record_video, /saveTo creates missing parent folders/);
-    assert.match(d.run_sequence, /max 2 evaluate steps/);
+    assert.match(d.run_sequence, /max 10 evaluate steps/);
     assert.match(d.run_sequence, /wait_for/);
     assert.match(d.inspect_page, /no WebGPU/);
     assert.match(d.take_screenshot, /no WebGPU/);
     assert.match(d.export_sequence, /pre-flight warnings/i);
     const vsteps = tools.find((t) => t.name === 'record_video').inputSchema.properties.steps.items.properties;
-    assert.match(vsteps.live.description, /freezes ONE frame/);
-    assert.match(vsteps.script.description, /Max 2 evaluate/);
+    assert.match(vsteps.live.description, /freeze ONE frame/);
+    assert.match(vsteps.live.description, /live after click/);
+    assert.match(vsteps.script.description, /Max 10 evaluate/);
+    assert.ok(vsteps.durationMs && vsteps.footer && vsteps.theme, 'card fields are in the schema');
+    assert.ok(vsteps.exactDuration && vsteps.requireVisible && vsteps.camera, 'highlight quality fields are in the schema');
+    assert.deepEqual(vsteps.style.enum, ['outline', 'pulse', 'glow', 'spotlight', 'arrow', 'focus', 'ring', 'glide']);
+    assert.match(vsteps.x.description, /INSTEAD of a selector/);
+    assert.equal(vsteps.coordinates, undefined, 'the server field is x/y, not "coordinates"');
+    assert.equal(vsteps.duration && /card/.test(vsteps.duration.description), false, 'the card field is durationMs, not duration');
   });
 });
 
-test('export_sequence reports pre-flight warnings and refuses 3 evaluate steps', async () => {
+test('export_sequence reports pre-flight warnings and refuses 11 evaluate steps', async () => {
   await withClient(async () => jsonResponse({}), async (client) => {
     const ev = { action: 'evaluate', script: '1' };
-    const bad = await client.callTool({ name: 'export_sequence', arguments: { name: 'x', steps: [ev, ev, ev] } });
+    const bad = await client.callTool({ name: 'export_sequence', arguments: { name: 'x', steps: Array.from({ length: 11 }, () => ev) } });
     assert.equal(bad.isError, true);
-    assert.match(bad.content[0].text, /3 evaluate steps/);
-    const ok = await client.callTool({ name: 'export_sequence', arguments: { name: 'x', steps: [{ action: 'navigate', url: 'https://example.com' }, { action: 'click', selector: '#a' }, { action: 'wait', ms: 2000 }] } });
+    assert.match(bad.content[0].text, /11 evaluate steps/);
+    const ok = await client.callTool({ name: 'export_sequence', arguments: { name: 'x', steps: [{ action: 'navigate', url: 'https://example.com' }, { action: 'click', selector: '#a' }, { action: 'wait', ms: 2000, live: false }] } });
     assert.notEqual(ok.isError, true);
     assert.match(ok.content[0].text, /Pre-flight warnings/);
   });
 });
 
-// ── Authoring params (requires pagebolt feat/video-authoring) ─────────────
-test('record_video forwards coordinates, rect, card, output and audio unchanged', async () => {
+// ── Authoring + capture truth + narration quality: the real combined server API ──────────
+test('record_video forwards x/y points, rect, card fields, output, audio and step_thumbnails unchanged', async () => {
   let seen;
   const tmp = mkdtempSync(join(tmpdir(), 'pagebolt-'));
   try {
@@ -893,12 +919,15 @@ test('record_video forwards coordinates, rect, card, output and audio unchanged'
         async: false, saveTo: join(tmp, 'v.mp4'),
         output: { width: 1920, height: 1080, fit: 'contain' },
         audio: { sampleRate: 48000, channels: 2 },
+        step_thumbnails: true,
+        audioGuide: { enabled: true, pacing: 'sequential', pronunciations: { Hale: { ipa: 'heɪl' }, codicil: 'kod ih sill' }, speakYears: false },
         steps: [
-          { action: 'card', title: 'Intro', subtitle: 'What we build', duration: 2000 },
+          { action: 'card', title: 'Intro', subtitle: 'What we build', footer: 'v1', durationMs: 2000, theme: { accent: '#ff0000' }, narration: 'Welcome.' },
           { action: 'navigate', url: 'https://example.com' },
-          { action: 'click', coordinates: { x: 640, y: 360 } },
-          { action: 'hover', coordinates: { x: 10, y: 20 } },
-          { action: 'highlight', rect: { x: 100, y: 100, width: 300, height: 200 }, label: 'Canvas' },
+          { action: 'click', x: 640, y: 360, narration: 'Click the node.' },
+          { action: 'wait', ms: 1500 },
+          { action: 'hover', x: 10, y: 20 },
+          { action: 'highlight', rect: { x: 100, y: 100, width: 300, height: 200 }, style: 'glide', label: 'Canvas', exactDuration: true, camera: 1.1 },
         ],
       } });
       assert.notEqual(res.isError, true, textOf(res));
@@ -906,42 +935,118 @@ test('record_video forwards coordinates, rect, card, output and audio unchanged'
     });
     assert.deepEqual(seen.output, { width: 1920, height: 1080, fit: 'contain' });
     assert.deepEqual(seen.audio, { sampleRate: 48000, channels: 2 });
-    assert.deepEqual(seen.steps[2], { action: 'click', coordinates: { x: 640, y: 360 } });
-    assert.deepEqual(seen.steps[4].rect, { x: 100, y: 100, width: 300, height: 200 });
-    assert.equal(seen.steps[0].title, 'Intro');
+    assert.equal(seen.step_thumbnails, true);
+    assert.deepEqual(seen.audioGuide.pronunciations, { Hale: { ipa: 'heɪl' }, codicil: 'kod ih sill' });
+    assert.deepEqual(seen.steps[2], { action: 'click', x: 640, y: 360, narration: 'Click the node.' });
+    assert.deepEqual(seen.steps[3], { action: 'wait', ms: 1500 }, 'no live flag is invented: the server decides');
+    assert.deepEqual(seen.steps[5].rect, { x: 100, y: 100, width: 300, height: 200 });
+    assert.equal(seen.steps[5].style, 'glide');
+    assert.equal(seen.steps[0].durationMs, 2000);
+    assert.deepEqual(seen.steps[0].theme, { accent: '#ff0000' });
   } finally { rmSync(tmp, { recursive: true, force: true }); }
 });
 
-test('record_video rehearse:true sends rehearse, renders evidence and saves no file', async () => {
-  let seen;
+test('record_video rejects out-of-viewport points, bad output and audio rates client-side (nothing billed)', async () => {
+  let calls = 0;
+  await withClient(() => { calls++; return okVideo(); }, async (client) => {
+    const bad = await client.callTool({ name: 'record_video', arguments: { async: false, viewport: { width: 640, height: 360 }, output: { width: 1921, height: 1080 }, audio: { sampleRate: 16000 }, steps: [
+      { action: 'navigate', url: 'https://example.com' }, { action: 'click', x: 900, y: 10 },
+    ] } });
+    // zod rejects the 16000 rate at the schema; either way nothing is sent
+    assert.equal(bad.isError, true);
+    const bad2 = await client.callTool({ name: 'record_video', arguments: { async: false, viewport: { width: 640, height: 360 }, output: { width: 1921, height: 1080 }, steps: [
+      { action: 'navigate', url: 'https://example.com' }, { action: 'click', x: 900, y: 10 }, { action: 'card', title: ' ' },
+    ] } });
+    assert.equal(bad2.isError, true);
+    assert.match(textOf(bad2), /Not sent \(nothing was billed\)/);
+    assert.match(textOf(bad2), /output\.width and output\.height must be even/);
+    assert.match(textOf(bad2), /step 1 \(click\): point \(900, 10\) is outside the 640x360 viewport/);
+    assert.match(textOf(bad2), /step 2 \(card\): needs a non-empty "title"/);
+  });
+  assert.equal(calls, 0);
+});
+
+test('record_video renders the server evidence fields (stop_reason, budget, visible:false, warnings) and returns step thumbnails as images', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'pagebolt-'));
+  try {
+    await withClient(() => okVideo({
+      steps_completed: 3, total_steps: 4, stopped_early: true, stopped_at_step: 3, stop_reason: 'max_duration', video_duration_s: 29.1,
+      budget: { effective_timeout_ms: 30000, max_steps: 20, per_step_budget_ms: 5000, max_frames: 5000, video_time_used_ms: 29100 },
+      warnings: ['step 1 highlight #detail: element not visible (offscreen x=1520>=1440)', 'render stopped early at step 3 (wait): Video duration reached 29100ms. The video contains only the steps before it.'],
+      step_results: [
+        { step_index: 0, index: 0, action: 'navigate', status: 'ok', start_s: 0, end_s: 1.2, frames_captured: 36, screencast_frames: 0, changed: true, thumbnail_base64: 'QUJD', thumbnail_content_type: 'image/jpeg' },
+        { step_index: 1, index: 1, action: 'highlight', status: 'ok', start_s: 1.6, end_s: 3, frames_captured: 42, changed: true, visible: false, highlight_drawn: false, selector: '#detail', warnings: ['step 1 highlight #detail: element not visible (offscreen x=1520>=1440)'], thumbnail_base64: 'REVG', thumbnail_content_type: 'image/jpeg' },
+        { step_index: 2, index: 2, action: 'wait', status: 'ok', start_s: 3, end_s: 8, frames_captured: 150, changed: false, live: true, live_reason: 'after_click' },
+        { step_index: 3, action: 'wait', status: 'timeout', error: 'Video duration reached 29100ms' },
+      ],
+    }), async (client) => {
+      const res = await client.callTool({ name: 'record_video', arguments: { async: false, saveTo: join(tmp, 'v.mp4'), step_thumbnails: true, steps: [
+        { action: 'navigate', url: 'https://example.com' }, { action: 'highlight', selector: '#detail' }, { action: 'wait', ms: 5000 }, { action: 'wait', ms: 1000 },
+      ] } });
+      const text = textOf(res);
+      assert.match(text, /STOPPED EARLY at step 3: max_duration/);
+      assert.match(text, /effective render budget: 30\.0 s, video time used 29\.1 s/);
+      assert.match(text, /Step 1 highlight #detail @1\.6 s-3\.0 s: target NOT VISIBLE - nothing was drawn/);
+      assert.match(text, /Step 2 wait 5\.0 s live @3\.0 s-8\.0 s: no visual change \(150 frames\)/);
+      assert.match(text, /Step 3 wait 1\.0 s: NOT RUN \(budget\)/);
+      assert.match(text, /INCOMPLETE: 3\/4/);
+      assert.match(text, /Server warnings \(2\)/);
+      const imgs = res.content.filter((c) => c.type === 'image');
+      assert.equal(imgs.length, 2);
+      assert.deepEqual(imgs[0], { type: 'image', data: 'QUJD', mimeType: 'image/jpeg' });
+    });
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('record_video rehearse:true POSTs to /api/v1/video/rehearse, renders steps[] (ok/error/visible/screenshot), bills no video and saves no file', async () => {
+  let seenUrl; let seen;
   await withClient((url, method, body) => {
-    seen = body;
-    return jsonResponse({ steps_completed: 2, total_steps: 2, duration_ms: 7000, step_results: [
-      { step_index: 0, action: 'navigate', status: 'ok', start_s: 0, end_s: 1, changed: true },
-      { step_index: 1, action: 'click', status: 'error', error: 'selector #nope not found' },
-    ] });
+    seenUrl = url; seen = body;
+    return jsonResponse({
+      rehearse: true, ok: false, steps_total: 3, steps_ok: 2, steps_failed: 1, duration_ms: 3100, viewport: { width: 1280, height: 720 },
+      usage: { rehearse_cost: 1, remaining: 98 },
+      warnings: ['step 2 highlight #detail: element not visible (offscreen x=1520>=1280)'],
+      steps: [
+        { index: 0, action: 'navigate', ok: true, duration_ms: 900, screenshot: { content_type: 'image/jpeg', width: 640, height: 360, size_bytes: 3, data: 'QUJD' } },
+        { index: 1, action: 'click', ok: false, error: 'Selector "#nope" did not match any element within 5000ms', selector: undefined },
+        { index: 2, action: 'highlight', ok: true, visible: false, highlight_drawn: false, selector: '#detail', warnings: ['step 2 highlight #detail: element not visible (offscreen x=1520>=1280)'], screenshot: { content_type: 'image/jpeg', width: 640, height: 360, size_bytes: 3, data: 'REVG' } },
+      ],
+    });
   }, async (client) => {
-    const res = await client.callTool({ name: 'record_video', arguments: { rehearse: true, steps: [{ action: 'navigate', url: 'https://example.com' }, { action: 'click', selector: '#nope' }] } });
+    const res = await client.callTool({ name: 'record_video', arguments: {
+      rehearse: true, async: false, saveTo: './should-not-exist-rehearse.mp4', audioGuide: { enabled: true },
+      steps: [{ action: 'navigate', url: 'https://example.com' }, { action: 'click', selector: '#nope' }, { action: 'highlight', selector: '#detail' }],
+    } });
     const text = textOf(res);
-    assert.match(text, /Rehearsal complete \(no video encoded\)/);
-    assert.match(text, /Step 1 click #nope: FAILED - selector #nope not found/);
+    assert.notEqual(res.isError, true, text);
+    assert.match(text, /Rehearsal FOUND PROBLEMS \(no video encoded, no narration\): 2\/3 steps ok in 3\.1 s/);
+    assert.match(text, /Cost:\s+1 API request\(s\), 98 remaining/);
+    assert.match(text, /Step 1 click #nope: FAILED - Selector "#nope" did not match/);
+    assert.match(text, /Step 2 highlight #detail: target NOT VISIBLE \(no highlight would be drawn\)/);
+    assert.equal(res.content.filter((c) => c.type === 'image').length, 2);
     assert.equal((res.content || []).find((c) => c.type === 'resource'), undefined);
   });
-  assert.equal(seen.rehearse, true);
+  assert.ok(seenUrl.endsWith('/api/v1/video/rehearse'), seenUrl);
+  assert.equal(seen.rehearse, undefined, 'the endpoint is the rehearsal, no flag in the body');
+  assert.equal(seen.async, undefined);
+  assert.equal(seen.saveTo, undefined);
+  assert.equal(seen.steps.length, 3);
+  assert.equal(existsSync('./should-not-exist-rehearse.mp4'), false);
 });
 
-test('record_video rehearse against an older backend says so instead of pretending', async () => {
+test('record_video rehearse against a backend without the endpoint says so instead of pretending', async () => {
   await withClient(() => jsonResponse({ steps_completed: 1, total_steps: 1 }), async (client) => {
-    const text = textOf(await client.callTool({ name: 'record_video', arguments: { rehearse: true, steps: [{ action: 'navigate', url: 'https://example.com' }] } }));
-    assert.match(text, /may not support "rehearse"/);
+    const res = await client.callTool({ name: 'record_video', arguments: { rehearse: true, steps: [{ action: 'navigate', url: 'https://example.com' }] } });
+    assert.equal(res.isError, true);
+    assert.match(textOf(res), /no per-step data/);
   });
 });
 
-test('export_sequence accepts coordinates/rect in place of selectors and card steps', async () => {
+test('export_sequence accepts x/y points and rect in place of selectors, and card steps', async () => {
   await withClient(async () => jsonResponse({}), async (client) => {
     const ok = await client.callTool({ name: 'export_sequence', arguments: { name: 'c', steps: [
       { action: 'card', title: 'Hi' },
-      { action: 'click', coordinates: { x: 1, y: 2 } },
+      { action: 'click', x: 1, y: 2 },
       { action: 'highlight', rect: { x: 0, y: 0, width: 5, height: 5 } },
     ] } });
     assert.notEqual(ok.isError, true, ok.content[0].text);

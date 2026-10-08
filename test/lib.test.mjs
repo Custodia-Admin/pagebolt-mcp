@@ -6,28 +6,29 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
-  preflight, formatPreflight, estimateVideoSeconds, expectedOutputSize, normalizePlan, MAX_EVALUATE_STEPS,
+  preflight, formatPreflight, estimateVideoSeconds, expectedOutputSize, normalizePlan, MAX_EVALUATE_STEPS, authoringErrors,
 } from '../src/lib/limits.mjs';
 import { resolveSavePath, prepareSaveTarget, writeVerified } from '../src/lib/save.mjs';
-import { renderEvidence, completenessNote } from '../src/lib/evidence.mjs';
+import { renderEvidence, completenessNote, evidenceImages, renderRehearsal } from '../src/lib/evidence.mjs';
 import { lookupPlan, resetPlanCache } from '../src/lib/plan.mjs';
 
 const nav = { action: 'navigate', url: 'https://example.com' };
 
 // ── validation: evaluate count ─────────────────────────────────────────
-test('preflight: 3 evaluate steps is a hard error naming the steps and the fix', () => {
-  const steps = [nav, ...Array.from({ length: 3 }, () => ({ action: 'evaluate', script: '1' }))];
+test('preflight: 11 evaluate steps is a hard error naming the steps and the fix', () => {
+  const steps = [nav, ...Array.from({ length: 11 }, () => ({ action: 'evaluate', script: '1' }))];
   const r = preflight('video', { steps });
   assert.equal(r.errors.length, 1);
-  assert.match(r.errors[0], /3 evaluate steps.*step 1, step 2, step 3.*at most 2/);
-  assert.match(r.errors[0], /IIFE/);
+  assert.match(r.errors[0], /11 evaluate steps.*step 1, step 2.*step 11.*at most 10/);
+  assert.match(r.errors[0], /Merge the scripts/);
 });
 
-test('preflight: exactly 2 evaluate steps is fine for video and sequence', () => {
+test('preflight: up to 10 evaluate steps is fine for video and sequence (server limit is 10, was 2)', () => {
   const ev = { action: 'evaluate', script: '1' };
-  assert.equal(MAX_EVALUATE_STEPS, 2);
-  assert.deepEqual(preflight('video', { steps: [nav, ev, ev] }).errors, []);
-  assert.deepEqual(preflight('sequence', { steps: [nav, ev, ev, { action: 'screenshot' }] }).errors, []);
+  assert.equal(MAX_EVALUATE_STEPS, 10);
+  const ten = Array.from({ length: 10 }, () => ev);
+  assert.deepEqual(preflight('video', { steps: [nav, ...ten] }).errors, []);
+  assert.deepEqual(preflight('sequence', { steps: [nav, ...ten, { action: 'screenshot' }] }).errors, []);
 });
 
 // ── validation: step counts vs plan ────────────────────────────────────
@@ -58,22 +59,25 @@ test('preflight: run_sequence needs 1..5 outputs; gif + audio rejected', () => {
 });
 
 // ── validation: live wait ──────────────────────────────────────────────
-test('preflight: wait directly after click/navigate/evaluate without live:true warns (video)', () => {
-  for (const action of ['click', 'navigate', 'evaluate']) {
+test('preflight: an explicit live:false wait right after click/navigate/evaluate warns (video); the default does not', () => {
+  for (const action of ['click', 'navigate', 'evaluate', 'press_key', 'select']) {
     const prev = action === 'navigate' ? nav : action === 'evaluate' ? { action, script: '1' } : { action, selector: '#go' };
-    const r = preflight('video', { steps: [nav, prev, { action: 'wait', ms: 3000 }] });
-    const w = r.warnings.find((x) => /step 2 is a wait right after/.test(x));
+    const r = preflight('video', { steps: [nav, prev, { action: 'wait', ms: 3000, live: false }] });
+    const w = r.warnings.find((x) => /step 2 is a wait with live:false right after/.test(x));
     assert.ok(w, `${action} should warn`);
-    assert.match(w, /live:true/);
-    assert.deepEqual(r.errors, [], 'a missing live flag is a warning, never an error');
+    assert.match(w, /Remove live:false/);
+    assert.deepEqual(r.errors, [], 'a static wait is a warning, never an error');
+    // the server records this wait live by default: no warning without the flag
+    const dflt = preflight('video', { steps: [nav, prev, { action: 'wait', ms: 3000 }] });
+    assert.ok(!dflt.warnings.some((x) => /wait (with live:false )?right after/.test(x)), `${action} default wait is live on the server`);
   }
 });
 
-test('preflight: live wait, or wait after other actions, does not warn', () => {
+test('preflight: live:true wait, or live:false after a non-animating action, does not warn', () => {
   const live = preflight('video', { steps: [nav, { action: 'click', selector: '#go' }, { action: 'wait', ms: 3000, live: true }] });
-  assert.ok(!live.warnings.some((w) => /wait right after/.test(w)));
-  const afterHover = preflight('video', { steps: [nav, { action: 'hover', selector: '#x' }, { action: 'wait', ms: 500 }] });
-  assert.ok(!afterHover.warnings.some((w) => /wait right after/.test(w)));
+  assert.ok(!live.warnings.some((w) => /right after/.test(w)));
+  const afterHover = preflight('video', { steps: [nav, { action: 'hover', selector: '#x' }, { action: 'wait', ms: 500, live: false }] });
+  assert.ok(!afterHover.warnings.some((w) => /right after/.test(w)));
 });
 
 test('preflight: sequence wait after click gives the wait_for hint, not the live hint', () => {
@@ -254,26 +258,78 @@ test('evidence: failed, timed-out and skipped steps are listed (fields that exis
   assert.match(t, /Server warnings \(1\)[\s\S]*cookie for other domain ignored/);
 });
 
-test('evidence: per-step timing, change flags, thumbnails, warnings, stopped_early, effective timeout', () => {
+test('evidence: server field names - per-step timing, change flags, visible:false, warnings, stopped_early + stop_reason + budget', () => {
   const t = renderEvidence({
-    stopped_early: true, stopped_at_step: 9, reason: 'duration budget reached', effective_timeout_ms: 75000,
-    warnings: ['wait without live', { code: 'no_motion', message: 'canvas never repainted', step_index: 6 }],
+    stopped_early: true, stopped_at_step: 9, stop_reason: 'max_duration',
+    budget: { effective_timeout_ms: 75000, video_time_used_ms: 74100, max_steps: 20 },
+    warnings: ['step 6 (wait, 5000 ms): no visual change captured; if the page animates, use live:true',
+      'step 7 highlight #detail: element not visible (offscreen x=1520>=1440)',
+      'step 7 highlight #detail: element not visible (offscreen x=1520>=1440)'],
     step_results: [
-      { step_index: 6, action: 'wait', status: 'ok', start_s: 12.0, end_s: 17.0, changed: false, change_pct: 0, thumbnail_url: 'https://x/t6.jpg' },
-      { step_index: 7, action: 'click', status: 'ok', start_s: 17.0, end_s: 18.2, changed: true },
+      { step_index: 6, index: 6, action: 'wait', status: 'ok', start_s: 12.0, end_s: 17.0, frames_captured: 150, screencast_frames: 0, changed: false, live: false, live_reason: 'auto_static' },
+      { step_index: 7, index: 7, action: 'highlight', status: 'ok', start_s: 17.0, end_s: 18.2, changed: true, visible: false, highlight_drawn: false, selector: '#detail', warnings: ['step 7 highlight #detail: element not visible (offscreen x=1520>=1440)'] },
+      { step_index: 8, index: 8, action: 'click', status: 'ok', start_s: 18.2, end_s: 19.4, changed: true, visible: true },
     ],
   }, [{}, {}, {}, {}, {}, {}, { action: 'wait', ms: 5000 }]);
-  assert.match(t, /STOPPED EARLY at step 9: duration budget reached/);
-  assert.match(t, /effective render budget: 75\.0 s/);
-  assert.match(t, /Step 6 wait 5\.0 s @12\.0 s-17\.0 s: no visual change \(0%\) - https:\/\/x\/t6\.jpg/);
-  assert.match(t, /1\/2 steps visibly changed/);
-  assert.match(t, /no_motion|canvas never repainted/);
-  assert.match(t, /step 6: canvas never repainted \[no_motion\]/);
-  assert.doesNotMatch(t, /Step 7 click/, 'steps that changed are not listed as problems');
+  assert.match(t, /STOPPED EARLY at step 9: max_duration/);
+  assert.match(t, /effective render budget: 75\.0 s, video time used 74\.1 s/);
+  assert.match(t, /Step 6 wait 5\.0 s static @12\.0 s-17\.0 s: no visual change \(150 frames\)/);
+  assert.match(t, /Step 7 highlight #detail @17\.0 s-18\.2 s: target NOT VISIBLE - nothing was drawn - step 7 highlight #detail: element not visible/);
+  assert.match(t, /2\/3 steps visibly changed/);
+  assert.doesNotMatch(t, /Step 8 click/, 'steps that changed and are visible are not listed as problems');
+  const warnBlock = t.slice(t.indexOf('Server warnings'));
+  assert.match(warnBlock, /Server warnings \(3\)/);
+  assert.equal((warnBlock.match(/element not visible/g) || []).length, 1, 'identical warnings are listed once');
 });
 
-test('evidence: live flag shows on the wait label; failures:false hides step errors (sequence has its own line)', () => {
-  const t = renderEvidence({ step_results: [{ step_index: 0, action: 'wait', status: 'ok', start_s: 0, end_s: 5, changed: false }] }, [{ action: 'wait', ms: 5000, live: true }]);
+test('evidence: narration sync offset (script mode) and coordinate/rect step labels', () => {
+  const t = renderEvidence({
+    step_results: [
+      { step_index: 0, action: 'click', status: 'error', error: 'timed out' },
+      { step_index: 1, action: 'highlight', status: 'error', error: 'x' },
+      { step_index: 2, action: 'hover', status: 'ok', sync_offset_ms: 340 },
+    ],
+  }, [{ action: 'click', x: 640, y: 360 }, { action: 'highlight', rect: { x: 10, y: 20, width: 30, height: 40 } }, { action: 'hover', selector: '#a' }]);
+  assert.match(t, /Step 0 click \(640,360\): FAILED/);
+  assert.match(t, /Step 1 highlight rect\(10,20 30x40\): FAILED/);
+  assert.match(t, /Step 2 hover #a: narration marker off by 340 ms/);
+});
+
+test('evidenceImages: step_thumbnails become image blocks (capped)', () => {
+  const data = { step_results: Array.from({ length: 15 }, (_, i) => ({ step_index: i, thumbnail_base64: 'QUJD', thumbnail_content_type: 'image/jpeg' })) };
+  const imgs = evidenceImages(data);
+  assert.equal(imgs.length, 12);
+  assert.deepEqual(imgs[0], { type: 'image', data: 'QUJD', mimeType: 'image/jpeg' });
+  assert.deepEqual(evidenceImages({}), []);
+  assert.equal(evidenceImages({ step_results: [{ step_index: 0 }] }).length, 0);
+});
+
+test('renderRehearsal: ok/error/visible per step, resolved point, warnings once, screenshots as images', () => {
+  const shot = (s) => ({ content_type: 'image/jpeg', width: 640, height: 360, size_bytes: 3, data: s });
+  const { text, images } = renderRehearsal({
+    rehearse: true, ok: false, steps_total: 4, steps_ok: 3, steps_failed: 1, duration_ms: 4200, viewport: { width: 1440, height: 900 },
+    usage: { rehearse_cost: 1, remaining: 99 }, ignored: ['audioGuide'],
+    warnings: ['step 2 highlight #detail: element not visible (offscreen x=1520>=1440)'],
+    steps: [
+      { index: 0, action: 'navigate', ok: true, screenshot: shot('QQ==') },
+      { index: 1, action: 'click', ok: false, error: 'Selector "#nope" did not match any element within 1200ms', screenshot: shot('Qg==') },
+      { index: 2, action: 'highlight', ok: true, visible: false, highlight_drawn: false, selector: '#detail', warnings: ['step 2 highlight #detail: element not visible (offscreen x=1520>=1440)'], screenshot: shot('Qw==') },
+      { index: 3, action: 'click', ok: true, visible: true, resolved_point: { x: 300, y: 200 } },
+    ],
+  }, [{}, { action: 'click', selector: '#nope' }, {}, { action: 'click', x: 300, y: 200 }]);
+  assert.match(text, /Rehearsal FOUND PROBLEMS \(no video encoded, no narration\): 3\/4 steps ok in 4\.2 s/);
+  assert.match(text, /Cost:\s+1 API request\(s\), 99 remaining/);
+  assert.match(text, /Step 1 click #nope: FAILED - Selector "#nope" did not match/);
+  assert.match(text, /Step 2 highlight #detail: target NOT VISIBLE \(no highlight would be drawn\) - step 2 highlight #detail: element not visible/);
+  assert.equal((text.match(/element not visible/g) || []).length, 1, 'the top-level warning duplicates the step line and is not repeated');
+  assert.match(text, /Ignored by a rehearsal: audioGuide/);
+  assert.equal(images.length, 3);
+  assert.equal(images[1].data, 'Qg==');
+  assert.match(text, /3 screenshot\(s\) attached/);
+});
+
+test('evidence: the server\'s live verdict shows on the wait label; failures:false hides step errors (sequence has its own line)', () => {
+  const t = renderEvidence({ step_results: [{ step_index: 0, action: 'wait', status: 'ok', start_s: 0, end_s: 5, changed: false, live: true }] }, [{ action: 'wait', ms: 5000 }]);
   assert.match(t, /Step 0 wait 5\.0 s live/);
   const seq = renderEvidence({ step_results: [{ step_index: 0, action: 'click', status: 'error', error: 'x' }] }, [], { failures: false });
   assert.equal(seq, '');
@@ -306,8 +362,52 @@ test('lookupPlan: reads /usage once, caches, and returns null on failure', async
   }
 });
 
-test('expectedOutputSize honours an explicit output size; card steps count toward the estimate', () => {
+test('expectedOutputSize honours an explicit output size', () => {
   assert.deepEqual(expectedOutputSize({ output: { width: 1920, height: 1080 }, frame: { enabled: true } }), { width: 1920, height: 1080 });
-  const e = estimateVideoSeconds({ steps: [{ action: 'card', duration: 4000, pauseAfter: 0 }] }).seconds;
-  assert.ok(Math.abs(e - 4) < 0.01);
+});
+
+test('estimate: card uses durationMs (default 3 s, NOT pace-scaled) + 0.35 s fade, and lasts for its narration', () => {
+  const sec = (steps, extra = {}) => estimateVideoSeconds({ steps, ...extra }).seconds;
+  assert.ok(Math.abs(sec([{ action: 'card', title: 'x', durationMs: 4000, pauseAfter: 0 }]) - 4.35) < 0.01);
+  assert.ok(Math.abs(sec([{ action: 'card', title: 'x', pauseAfter: 0 }]) - 3.35) < 0.01);
+  assert.ok(Math.abs(sec([{ action: 'card', title: 'x', durationMs: 4000, pauseAfter: 0 }], { pace: 'slow' }) - 4.35) < 0.01, 'pace does not change a card');
+  const words = Array.from({ length: 50 }, () => 'w').join(' ');   // 20 s of speech at 150 wpm
+  const narrated = sec([{ action: 'card', title: 'x', durationMs: 2000, narration: words, pauseAfter: 0 }], { audioGuide: { enabled: true } });
+  assert.ok(narrated > 20 && narrated < 21.5, `narrated card ~20.75 s, got ${narrated}`);
+});
+
+test('estimate: a narrated highlight lasts as long as its clip (cap 40 s) unless exactDuration:true', () => {
+  const words = Array.from({ length: 50 }, () => 'w').join(' ');   // 20 s of speech
+  const base = { action: 'highlight', selector: '#a', duration: 2000, narration: words, pauseAfter: 0 };
+  const long = estimateVideoSeconds({ steps: [base], audioGuide: { enabled: true, pacing: 'sequential' } }).seconds;
+  const exact = estimateVideoSeconds({ steps: [{ ...base, exactDuration: true }], audioGuide: { enabled: true, pacing: 'sequential' } }).seconds;
+  assert.ok(long >= 20, `got ${long}`);
+  assert.ok(exact >= 20, 'sequential still waits for the voice to finish before the next step');
+  const ov = estimateVideoSeconds({ steps: [{ ...base, exactDuration: true }], audioGuide: { enabled: true } }).seconds;
+  assert.ok(ov < long + 1);
+});
+
+test('authoringErrors: output, audio, coordinate targets, rect, card, highlight style mirror the server validation', () => {
+  const nav = { action: 'navigate', url: 'https://example.com' };
+  const errs = (p) => authoringErrors({ viewport: { width: 640, height: 360 }, ...p });
+  assert.deepEqual(errs({ output: { width: 1920, height: 1080 }, audio: { sampleRate: 48000, channels: 2 }, steps: [nav, { action: 'click', x: 10, y: 20 }, { action: 'highlight', rect: { x: 0, y: 0, width: 640, height: 360 }, style: 'glide' }, { action: 'card', title: 'Hi', durationMs: 500 }] }), []);
+  assert.match(errs({ output: { width: 1921, height: 1080 }, steps: [nav] })[0], /even/);
+  assert.match(errs({ output: { width: 300, height: 1080 }, steps: [nav] })[0], /output\.width/);
+  assert.match(errs({ output: { width: 1920, height: 1080, fit: 'fill' }, steps: [nav] })[0], /output\.fit must be one of: contain, cover/);
+  assert.match(errs({ format: 'gif', output: { width: 1920, height: 1080 }, steps: [nav] })[0], /not supported for format "gif"/);
+  assert.match(errs({ audio: { sampleRate: 16000 }, steps: [nav] })[0], /audio\.sampleRate must be one of: 24000, 44100, 48000/);
+  assert.match(errs({ steps: [nav, { action: 'click', x: 700, y: 20 }] })[0], /step 1 \(click\): point \(700, 20\) is outside the 640x360 viewport/);
+  assert.match(errs({ steps: [nav, { action: 'hover', x: 5 }] })[0], /numeric x and y/);
+  assert.match(errs({ steps: [nav, { action: 'click', selector: '#a', x: 1, y: 2 }] })[0], /either "selector" or the x\/y point/);
+  assert.match(errs({ steps: [nav, { action: 'click' }] })[0], /needs a "selector" or an x\/y point/);
+  assert.match(errs({ steps: [nav, { action: 'highlight', rect: { x: 600, y: 0, width: 100, height: 10 } }] })[0], /rect must lie inside the 640x360 viewport/);
+  assert.match(errs({ steps: [nav, { action: 'highlight', selector: '#a', rect: { x: 0, y: 0, width: 5, height: 5 } }] })[0], /either "selector" or "rect"/);
+  assert.match(errs({ steps: [nav, { action: 'highlight' }] })[0], /needs a "selector" or a "rect"/);
+  assert.match(errs({ steps: [nav, { action: 'highlight', selector: '#a', style: 'sparkle' }] })[0], /style must be one of: outline, pulse, glow, spotlight, arrow, focus, ring, glide/);
+  assert.match(errs({ steps: [nav, { action: 'card', title: '   ' }] })[0], /non-empty "title"/);
+  assert.match(errs({ steps: [nav, { action: 'card', title: 'x', durationMs: 100 }] })[0], /durationMs must be 500-10000/);
+  assert.match(errs({ steps: [nav, { action: 'card', title: 'x', theme: { accent: 'red' } }] })[0], /theme\.accent must be a #RRGGBB/);
+  // default viewport is 1280x720
+  assert.deepEqual(authoringErrors({ steps: [nav, { action: 'click', x: 1279, y: 719 }] }), []);
+  assert.equal(authoringErrors({ steps: [nav, { action: 'click', x: 1280, y: 10 }] }).length, 1);
 });
