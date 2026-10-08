@@ -305,3 +305,9 @@ test('lookupPlan: reads /usage once, caches, and returns null on failure', async
     resetPlanCache();
   }
 });
+
+test('expectedOutputSize honours an explicit output size; card steps count toward the estimate', () => {
+  assert.deepEqual(expectedOutputSize({ output: { width: 1920, height: 1080 }, frame: { enabled: true } }), { width: 1920, height: 1080 });
+  const e = estimateVideoSeconds({ steps: [{ action: 'card', duration: 4000, pauseAfter: 0 }] }).seconds;
+  assert.ok(Math.abs(e - 4) < 0.01);
+});

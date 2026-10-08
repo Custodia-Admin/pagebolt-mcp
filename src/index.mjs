@@ -816,10 +816,14 @@ server.tool(
       z.object({
         action: z.enum([
           'navigate', 'click', 'dblclick', 'fill', 'select', 'hover',
-          'scroll', 'wait', 'wait_for', 'evaluate', 'press_key', 'highlight',
-        ]).describe('The action to perform ("highlight" draws an animated attention effect around `selector`; no screenshot/pdf — the whole sequence is recorded as video)'),
+          'scroll', 'wait', 'wait_for', 'evaluate', 'press_key', 'highlight', 'card',
+        ]).describe('The action to perform ("highlight" draws an animated attention effect around `selector` or `rect`; "card" shows a full-frame title card; no screenshot/pdf — the whole sequence is recorded as video)'),
         url: z.string().url().optional().describe('URL to navigate to (for navigate action)'),
         selector: z.string().optional().describe('CSS selector for the target element (optional for press_key to focus a field first)'),
+        coordinates: z.object({ x: z.number().min(0), y: z.number().min(0) }).optional().describe('click/dblclick/hover: viewport pixel position to act on INSTEAD of a selector (canvas, WebGL and map UIs that have no clickable element). Requires a backend with authoring support.'),
+        rect: z.object({ x: z.number().min(0), y: z.number().min(0), width: z.number().positive(), height: z.number().positive() }).optional().describe('highlight: viewport rectangle to highlight INSTEAD of a selector (for canvas regions). Requires a backend with authoring support.'),
+        title: z.string().max(120).optional().describe('card action: headline text.'),
+        subtitle: z.string().max(240).optional().describe('card action: secondary text.'),
         value: z.string().optional().describe('Value to type or select'),
         key: z.enum(['Escape', 'Enter', 'Tab', 'Backspace', 'Delete', 'Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown']).optional().describe('Key to press (for press_key action). Use Escape to dismiss a dropdown/popover/modal that a previous step opened — the cleanest way to avoid a stuck-open overlay obscuring later steps.'),
         ms: z.number().int().min(0).max(10000).optional().describe('Milliseconds to wait (wait action), multiplied by pace and capped at 10000. Without live:true the wait freezes one frame. Only use wait for loading time, animation capture (live:true) or narration holds; pace handles inter-step timing.'),
@@ -905,6 +909,17 @@ server.tool(
     blockChats: z.boolean().optional().describe('Block live chat widgets'),
     blockTrackers: z.boolean().optional().describe('Block tracking scripts'),
     deviceScaleFactor: z.number().min(1).max(3).optional().describe('Device pixel ratio (default: 1)'),
+    // ── Authoring (requires pagebolt feat/video-authoring) ──
+    output: z.object({
+      width: z.number().int().min(320).max(3840),
+      height: z.number().int().min(200).max(2160),
+      fit: z.enum(['contain', 'cover', 'fill']).optional().describe('How the recording is fitted into width x height (default contain, letterboxed). Requires a backend with authoring support.'),
+    }).optional().describe('Exact output size, e.g. {width:1920,height:1080,fit:"contain"}, instead of the viewport-derived size (which grows with frame/background). Requires a backend with authoring support.'),
+    audio: z.object({
+      sampleRate: z.number().int().optional().describe('Narration sample rate in Hz, e.g. 48000 (default 24000).'),
+      channels: z.union([z.literal(1), z.literal(2)]).optional().describe('1 = mono (default), 2 = stereo.'),
+    }).optional().describe('Narration audio format of the encoded file. Requires a backend with authoring support.'),
+    rehearse: z.boolean().optional().describe('Dry run: execute the steps and return per-step evidence (found/changed/timing) WITHOUT encoding or billing a video. Use it to validate selectors and waits before the real render. Requires a backend with authoring support; on older backends the call is rejected.'),
     // ── Authenticated recording ──
     cookies: z.array(cookieSchema).max(100).optional().describe('Cookies to set before the first navigation — "name=value" strings or full cookie objects (domain, path, secure, httpOnly, sameSite, expires). Up to 100. Domain defaults to the first navigate step\'s host.'),
     authState: authStateSchema,
@@ -958,6 +973,25 @@ server.tool(
         savePath = safePath(saveTo, `./recording.${ext}`);
       } catch (saveErr) {
         return { content: [{ type: 'text', text: `Not sent (nothing was billed). ${saveErr.message}` }], isError: true };
+      }
+    }
+    // Dry run (requires pagebolt feat/video-authoring): per-step evidence, no encode, no video billed.
+    if (params.rehearse) {
+      try {
+        const res = await callApi('/api/v1/video', { method: 'POST', body: { ...apiParams, response_type: 'json' } });
+        const data = await res.json();
+        const lines = ['Rehearsal complete (no video encoded).'];
+        if (data.steps_completed != null) lines.push(`  Steps:    ${data.steps_completed}/${data.total_steps} ran`);
+        if (data.duration_ms != null) lines.push(`  Duration: ${(data.duration_ms / 1000).toFixed(1)}s (would-be video length)`);
+        const ev = renderEvidence(data, params.steps);
+        if (ev) lines.push(ev);
+        const inc = completenessNote(data);
+        if (inc) lines.push(inc);
+        if (!ev && !(Array.isArray(data.step_results) && data.step_results.length)) lines.push('  The backend returned no per-step data: it may not support "rehearse" yet, and may have rendered a normal video.');
+        const preBlock = formatPreflight(pre);
+        return { content: [{ type: 'text', text: lines.join('\n') + (preBlock ? '\n' + preBlock : '') }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: `Rehearsal error: ${err.message}` }], isError: true };
       }
     }
     const preText = formatPreflight(pre);
@@ -1459,11 +1493,13 @@ server.tool(
 // ═══════════════════════════════════════════════════════════════
 // Tool: export_sequence — build a re-runnable sequence as importable JSON
 // ═══════════════════════════════════════════════════════════════
-const EXPORT_ACTIONS = ['navigate', 'click', 'dblclick', 'fill', 'select', 'hover', 'scroll', 'wait', 'wait_for', 'evaluate', 'press_key', 'highlight', 'screenshot', 'pdf'];
+const EXPORT_ACTIONS = ['navigate', 'click', 'dblclick', 'fill', 'select', 'hover', 'scroll', 'wait', 'wait_for', 'evaluate', 'press_key', 'highlight', 'card', 'screenshot', 'pdf'];
 const EXPORT_NEEDS = {
   navigate: ['url'], click: ['selector'], dblclick: ['selector'], fill: ['selector', 'value'],
-  select: ['selector', 'value'], hover: ['selector'], wait_for: [], highlight: ['selector'], evaluate: ['script'],
+  select: ['selector', 'value'], hover: ['selector'], wait_for: [], highlight: ['selector'], evaluate: ['script'], card: ['title'],
 };
+// Authoring alternatives: a field may be replaced by another (canvas UIs have no selector).
+const EXPORT_ALT = { click: { selector: 'coordinates' }, dblclick: { selector: 'coordinates' }, hover: { selector: 'coordinates' }, highlight: { selector: 'rect' } };
 
 server.tool(
   'export_sequence',
@@ -1494,6 +1530,8 @@ server.tool(
         return;
       }
       for (const f of EXPORT_NEEDS[st.action] || []) {
+        const alt = EXPORT_ALT[st.action] && EXPORT_ALT[st.action][f];
+        if (alt && st[alt] !== undefined) continue;
         if (st[f] === undefined || st[f] === '') problems.push(`step ${i + 1} (${st.action}): "${f}" is required`);
       }
       if (st.action === 'scroll' && !st.selector && st.y === undefined && st.x === undefined) {

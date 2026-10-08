@@ -882,3 +882,70 @@ test('export_sequence reports pre-flight warnings and refuses 3 evaluate steps',
     assert.match(ok.content[0].text, /Pre-flight warnings/);
   });
 });
+
+// ── Authoring params (requires pagebolt feat/video-authoring) ─────────────
+test('record_video forwards coordinates, rect, card, output and audio unchanged', async () => {
+  let seen;
+  const tmp = mkdtempSync(join(tmpdir(), 'pagebolt-'));
+  try {
+    await withClient((url, method, body) => { seen = body; return okVideo(); }, async (client) => {
+      const res = await client.callTool({ name: 'record_video', arguments: {
+        async: false, saveTo: join(tmp, 'v.mp4'),
+        output: { width: 1920, height: 1080, fit: 'contain' },
+        audio: { sampleRate: 48000, channels: 2 },
+        steps: [
+          { action: 'card', title: 'Intro', subtitle: 'What we build', duration: 2000 },
+          { action: 'navigate', url: 'https://example.com' },
+          { action: 'click', coordinates: { x: 640, y: 360 } },
+          { action: 'hover', coordinates: { x: 10, y: 20 } },
+          { action: 'highlight', rect: { x: 100, y: 100, width: 300, height: 200 }, label: 'Canvas' },
+        ],
+      } });
+      assert.notEqual(res.isError, true, textOf(res));
+      assert.match(textOf(res), /Output:\s+1920x1080|Output:\s+~1920x1080/);
+    });
+    assert.deepEqual(seen.output, { width: 1920, height: 1080, fit: 'contain' });
+    assert.deepEqual(seen.audio, { sampleRate: 48000, channels: 2 });
+    assert.deepEqual(seen.steps[2], { action: 'click', coordinates: { x: 640, y: 360 } });
+    assert.deepEqual(seen.steps[4].rect, { x: 100, y: 100, width: 300, height: 200 });
+    assert.equal(seen.steps[0].title, 'Intro');
+  } finally { rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('record_video rehearse:true sends rehearse, renders evidence and saves no file', async () => {
+  let seen;
+  await withClient((url, method, body) => {
+    seen = body;
+    return jsonResponse({ steps_completed: 2, total_steps: 2, duration_ms: 7000, step_results: [
+      { step_index: 0, action: 'navigate', status: 'ok', start_s: 0, end_s: 1, changed: true },
+      { step_index: 1, action: 'click', status: 'error', error: 'selector #nope not found' },
+    ] });
+  }, async (client) => {
+    const res = await client.callTool({ name: 'record_video', arguments: { rehearse: true, steps: [{ action: 'navigate', url: 'https://example.com' }, { action: 'click', selector: '#nope' }] } });
+    const text = textOf(res);
+    assert.match(text, /Rehearsal complete \(no video encoded\)/);
+    assert.match(text, /Step 1 click #nope: FAILED - selector #nope not found/);
+    assert.equal((res.content || []).find((c) => c.type === 'resource'), undefined);
+  });
+  assert.equal(seen.rehearse, true);
+});
+
+test('record_video rehearse against an older backend says so instead of pretending', async () => {
+  await withClient(() => jsonResponse({ steps_completed: 1, total_steps: 1 }), async (client) => {
+    const text = textOf(await client.callTool({ name: 'record_video', arguments: { rehearse: true, steps: [{ action: 'navigate', url: 'https://example.com' }] } }));
+    assert.match(text, /may not support "rehearse"/);
+  });
+});
+
+test('export_sequence accepts coordinates/rect in place of selectors and card steps', async () => {
+  await withClient(async () => jsonResponse({}), async (client) => {
+    const ok = await client.callTool({ name: 'export_sequence', arguments: { name: 'c', steps: [
+      { action: 'card', title: 'Hi' },
+      { action: 'click', coordinates: { x: 1, y: 2 } },
+      { action: 'highlight', rect: { x: 0, y: 0, width: 5, height: 5 } },
+    ] } });
+    assert.notEqual(ok.isError, true, ok.content[0].text);
+    const bad = await client.callTool({ name: 'export_sequence', arguments: { name: 'c', steps: [{ action: 'click' }] } });
+    assert.equal(bad.isError, true);
+  });
+});

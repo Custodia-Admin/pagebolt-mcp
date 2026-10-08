@@ -83,6 +83,7 @@ function stepSeconds(step, pace, narrationS) {
     case 'wait_for': return 0.2;
     case 'evaluate': return 0.1;
     case 'highlight': return highlightSeconds(step, pace, narrationS);
+    case 'card': return ((step.duration || 3000) * pace) / 1000;
     default: return 0;
   }
 }
@@ -255,6 +256,9 @@ const makeEven = (n) => (n % 2 === 0 ? n : n + 1);
  * default 40 by the server). Returns {width, height}. Informational only.
  */
 export function expectedOutputSize(params) {
+  if (params.output && params.output.width && params.output.height) {
+    return { width: params.output.width, height: params.output.height };
+  }
   const vp = params.viewport || {};
   const dsf = Math.min(Math.max(params.deviceScaleFactor || 1, 1), 3);
   const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
