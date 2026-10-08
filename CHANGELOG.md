@@ -5,6 +5,21 @@ All notable changes to the PageBolt MCP server are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.18.0]
+
+### Added
+
+- **Client-side pre-flight for `record_video`, `run_sequence` and `export_sequence`.** Errors stop the call before it is billed (more than 2 `evaluate` steps, `gif` with `audioGuide`, missing or more than 5 sequence outputs). Warnings are appended to the result and the request is still sent: a `wait` right after `click` / `navigate` / `evaluate` without `live: true`, step count or format above your plan, estimated length above ~200 s / your plan budget / the 5000-frame cap (naming the step where the render would stop), `wait` x `pace` over 10 s, WebGPU in an `evaluate`, `narration` without `audioGuide.enabled`, localhost or private navigate URLs. The plan is read once from `GET /api/v1/usage` and cached; if that fails, plan checks are skipped.
+- **Per-step evidence in results.** When the backend returns them, `record_video` shows failed / skipped / budget-cut steps, `start_s` / `end_s`, `changed` (`no visual change`), `thumbnail_url`, `warnings[]`, `auth_warnings[]`, `stopped_early` / `stopped_at_step` / `reason` and `effective_timeout_ms`, plus an `INCOMPLETE: n/m` line. Output is unchanged when none are present, apart from the expected output size and a reminder that `Steps: N/N` does not prove anything moved.
+- Design doc for recording localhost apps without a public tunnel: `docs/design/local-target-connector.md`.
+- `PAGEBOLT_MCP_SAVE_ROOT` and `PAGEBOLT_MCP_NO_PLAN_LOOKUP` environment variables.
+
+### Changed
+
+- **`saveTo` no longer fails silently.** Missing parent folders are created recursively; the path is validated before the render is requested; the result reports the absolute path and the byte size read back from disk; an unwritable path returns an error instead of "saved"; a hosted (private) async video that cannot be downloaded says `NOT SAVED`. `saveTo` is still confined to the working directory (symlink escapes are now refused too) unless `PAGEBOLT_MCP_SAVE_ROOT` allows more. Also applies to `generate_pdf`.
+- **Tool descriptions** for `record_video`, `run_sequence`, `inspect_page`, `take_screenshot` and `export_sequence` now state: `wait` freezes one frame unless `live: true`; the 2-`evaluate` cap and that evaluate time is not recorded; plan step limits and the duration budget; output dimensions with `frame` / `background`; narration audio (mono 24 kHz, AAC / Opus); PageBolt browsers have no WebGPU (WebGL is software); the target must be public; how to verify a render.
+- The `user-agent` and server `version` now report the real package version (they were stuck at 1.16.x).
+
 ## [1.17.0]
 
 ### Added

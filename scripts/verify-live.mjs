@@ -30,7 +30,7 @@ async function api(endpoint, { method = 'GET', body } = {}) {
     method,
     headers: {
       'x-api-key': API_KEY,
-      'user-agent': 'pagebolt-mcp-verify/1.16.0',
+      'user-agent': 'pagebolt-mcp-verify/1.18.0',
       ...(body ? { 'Content-Type': 'application/json' } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
