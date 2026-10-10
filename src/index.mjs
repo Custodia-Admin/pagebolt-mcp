@@ -794,7 +794,7 @@ server.tool(
         x: z.number().optional().describe('Horizontal scroll position in pixels (scroll action). Use when scrolling horizontally without a selector.'),
         y: z.number().optional().describe('Vertical scroll position in pixels (scroll action). REQUIRED when no selector is provided — e.g. {"action":"scroll","y":800} scrolls 800px down.'),
         script: z.string().max(5000).optional().describe('JavaScript to execute in page context (for evaluate action)'),
-        style: z.enum(['outline', 'pulse', 'glow', 'spotlight', 'arrow']).optional().describe('highlight action: outline = animated line circling the element (default), pulse = expanding rings, glow = breathing glow, spotlight = dims everything else, arrow = bobbing arrow pointing at it'),
+        style: z.enum(['outline', 'pulse', 'glow', 'spotlight', 'arrow']).optional().describe('highlight action: spotlight = dims everything else (default), outline = animated line circling the element, pulse = expanding rings, glow = breathing glow, arrow = bobbing arrow pointing at it'),
         color: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional().describe('highlight action: hex color, e.g. "#818cf8" (default soft indigo)'),
         duration: z.number().int().min(200).max(15000).optional().describe('highlight action: how long the effect shows, in ms (default 3500; extended automatically when a note is present)'),
         thickness: z.number().min(1).max(20).optional().describe('highlight action: line thickness in px (default 2)'),
