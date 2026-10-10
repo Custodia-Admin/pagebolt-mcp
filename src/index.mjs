@@ -41,6 +41,39 @@ function safePath(userPath, defaultName) {
 const API_KEY = process.env.PAGEBOLT_API_KEY;
 const BASE_URL = (process.env.PAGEBOLT_BASE_URL || 'https://pagebolt.dev').replace(/\/$/, '');
 
+// Bring-your-own-key ElevenLabs narration. Prefer setting ELEVENLABS_API_KEY in the MCP
+// server's environment: the key then travels only in the X-ElevenLabs-Key header to PageBolt
+// and never appears in the model's tool arguments or the chat transcript. PageBolt holds it in
+// memory for one recording and never stores it. Read per call so tests can set it.
+function elevenLabsKey(explicit) {
+  if (typeof explicit === 'string' && explicit.trim()) return explicit.trim();
+  const env = process.env.ELEVENLABS_API_KEY;
+  return env && env.trim() ? env.trim() : null;
+}
+
+/**
+ * Move an ElevenLabs key out of audioGuide (where the model may have put it) into a header,
+ * falling back to ELEVENLABS_API_KEY. Returns { body, headers } with the key removed from body.
+ */
+function elevenLabsRouting(apiParams) {
+  const ag = apiParams && apiParams.audioGuide;
+  if (!ag || ag.provider !== 'elevenlabs') return { body: apiParams, headers: {} };
+  const el = ag.elevenlabs || {};
+  const { apiKey, ...rest } = el;
+  const key = elevenLabsKey(apiKey);
+  return {
+    body: { ...apiParams, audioGuide: { ...ag, elevenlabs: rest } },
+    headers: key ? { 'X-ElevenLabs-Key': key } : {},
+  };
+}
+
+/** Drop any ElevenLabs key before something is echoed back or saved. */
+function stripElevenLabsKey(audioGuide) {
+  if (!audioGuide || !audioGuide.elevenlabs) return audioGuide;
+  const { apiKey, ...rest } = audioGuide.elevenlabs; // eslint-disable-line no-unused-vars
+  return { ...audioGuide, elevenlabs: rest };
+}
+
 function requireApiKey() {
   if (!API_KEY) {
     throw new Error(
@@ -63,8 +96,10 @@ async function callApi(endpoint, options = {}) {
     'x-api-key': API_KEY,
     'user-agent': 'pagebolt-mcp/1.16.1',
     ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+    ...(options.headers || {}),
   };
   const body = options.body ? JSON.stringify(options.body) : undefined;
+  const carriesElevenLabsKey = Object.keys(options.headers || {}).some((h) => h.toLowerCase() === 'x-elevenlabs-key');
 
   let lastError;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -94,14 +129,20 @@ async function callApi(endpoint, options = {}) {
       } catch {
         errorMsg = `HTTP ${res.status} ${res.statusText}`;
       }
-      throw new Error(`PageBolt API error (${res.status}): ${errorMsg}`);
+      const httpErr = new Error(`PageBolt API error (${res.status}): ${errorMsg}`);
+      // Only for requests that carry a customer's ElevenLabs key: a 4xx (key refused, voice
+      // missing, credits) is final, so the key is not sent a second time and the rejected-key
+      // budget is not spent twice. Every other request keeps the existing single retry after a
+      // 4xx (unchanged behaviour for existing scripts). 5xx / network keep the retry everywhere.
+      httpErr.finalClientError = carriesElevenLabsKey && res.status >= 400 && res.status < 500;
+      throw httpErr;
     } catch (err) {
       clearTimeout(timer);
       if (err.name === 'AbortError') {
         throw new Error(`PageBolt API error: request timed out after ${REQUEST_TIMEOUT_MS / 1000}s. The target site may be slow or unresponsive.`);
       }
       lastError = err;
-      if (attempt < MAX_RETRIES && !err.message.startsWith('PageBolt API error:')) {
+      if (attempt < MAX_RETRIES && !err.finalClientError && !err.message.startsWith('PageBolt API error:')) {
         await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
         continue;
       }
@@ -318,6 +359,7 @@ record_video supports polished video output:
 - **Step notes (IMPORTANT)**: Add a "note" field to EVERY action step for guided-tour-style tooltip annotations. Notes appear as beautiful styled tooltips near the element being interacted with. Example: { action: "click", selector: "#btn", note: "Click here to open settings" }. The only steps that should NOT have notes are wait/wait_for pauses.
 - **Audio Guide**: Add audioGuide: { enabled: true, script: "Welcome. {{1}} Click here. {{2}} Done." } for AI voice narration. Two modes: (1) Per-step — add "narration" text to individual steps. (2) Script — provide a single "script" with {{N}} markers for continuous narration synchronized to steps.
 - Audio Guide voices: ava, andrew, emma, brian, aria, guy, jenny, davis, christopher, michelle (Azure) or alloy, echo, fable, nova, onyx, shimmer (OpenAI).
+- **ElevenLabs (bring your own key)**: audioGuide: { enabled: true, provider: "elevenlabs", elevenlabs: { voiceId: "..." }, script: "{{0}} ..." } uses the user's own ElevenLabs account and any voice in it (list them with list_elevenlabs_voices). The key comes from the ELEVENLABS_API_KEY env var of this MCP server and is never stored by PageBolt; it is billed to their ElevenLabs credits, not PageBolt's narration allowance. Script mode gives the most even tempo, and markers land on the exact word.
 - **Variables**: Pass variables: { "base_url": "https://example.com" } and use {{base_url}} in step URLs/values for reusable recordings.
 
 ## IMPORTANT: Video Step Best Practices
@@ -878,16 +920,27 @@ server.tool(
     // ── Audio Guide ──
     audioGuide: z.object({
       enabled: z.boolean().optional().describe('Enable Audio Guide narration'),
-      provider: z.enum(['azure', 'openai']).optional().describe('TTS provider (default: azure)'),
-      voice: z.string().optional().describe('Voice preset. Azure voices (default provider): ava (female), andrew (male), emma (female), brian (male), aria (female), guy (male), jenny (female), davis (male), christopher (male), michelle (female). Default: ava. OpenAI voices (only if provider:"openai"): alloy, echo, fable, nova, onyx, shimmer. Do NOT use OpenAI voices with Azure provider.'),
-      speed: z.number().min(0.5).max(2.0).optional().describe('Speech rate (default: 1.0)'),
+      provider: z.enum(['azure', 'openai', 'elevenlabs']).optional().describe('TTS provider (default: azure). "elevenlabs" = the user\'s OWN ElevenLabs account (bring your own key): any voice in it incl. cloned voices, billed to their ElevenLabs credits, does not use PageBolt\'s narration allowance. Needs audioGuide.elevenlabs.voiceId (or voiceName) and the ELEVENLABS_API_KEY env var on this MCP server.'),
+      elevenlabs: z.object({
+        voiceId: z.string().optional().describe('ElevenLabs voice ID from the user\'s account (see list_elevenlabs_voices). Required unless voiceName is given.'),
+        voiceName: z.string().max(100).optional().describe('Voice name in the user\'s ElevenLabs account, e.g. "Rachel"; resolved server-side.'),
+        modelId: z.string().optional().describe('ElevenLabs model. Default eleven_multilingual_v2 (best narration quality). eleven_turbo_v2_5 / eleven_flash_v2_5 are faster and cost half the credits.'),
+        stability: z.number().min(0).max(1).optional().describe('0-1. 0.45-0.6 gives an even explainer read. Default: the voice\'s own setting.'),
+        similarityBoost: z.number().min(0).max(1).optional().describe('0-1 (ElevenLabs default 0.75).'),
+        style: z.number().min(0).max(1).optional().describe('0-1 style exaggeration; keep 0 for product demos.'),
+        speakerBoost: z.boolean().optional().describe('Speaker boost.'),
+        apiKey: z.string().optional().describe('Avoid: prefer the ELEVENLABS_API_KEY env var so the key never enters the conversation. If given, it is sent only as a header and never stored by PageBolt.'),
+      }).optional().describe('Settings for provider "elevenlabs". The key comes from ELEVENLABS_API_KEY (MCP server env); PageBolt checks key, voice and credits before recording, so a bad key fails fast without charging a render.'),
+      voice: z.string().optional().describe('Voice preset. Azure voices (default provider): ava (female), andrew (male), emma (female), brian (male), aria (female), guy (male), jenny (female), davis (male), christopher (male), michelle (female). Default: ava. OpenAI voices (only if provider:"openai"): alloy, echo, fable, nova, onyx, shimmer. Do NOT use OpenAI voices with Azure provider. Not used with provider "elevenlabs" (use elevenlabs.voiceId).'),
+      speed: z.number().min(0.5).max(2.0).optional().describe('Speech rate (default: 1.0). With provider "elevenlabs": 0.7-1.2.'),
       pitch: z.string().optional().describe('Voice pitch: default, x-low, low, medium, high, x-high (Azure only)'),
       volume: z.string().optional().describe('Audio volume: default, silent, x-soft, soft, medium, loud, x-loud (Azure only)'),
       style: z.string().optional().describe('Speaking style: narration-professional, cheerful, excited, friendly, etc. (Azure only)'),
       styleDegree: z.number().min(0.01).max(2.0).optional().describe('Style intensity 0.01-2.0 (Azure only)'),
       pacing: z.enum(['overlap', 'sequential']).optional().describe('overlap (default): narration plays while the video continues (highlights and next steps run alongside it); sequential: each narrated step waits for its clip to finish.'),
       model: z.enum(['tts-1', 'tts-1-hd']).optional().describe('OpenAI model (OpenAI only, default: tts-1)'),
-      script: z.string().max(5000).optional().describe('Script mode: a single narration script with {{N}} step markers (0-indexed) for synchronized narration. Steps execute when narration reaches each marker. When provided, per-step "narration" fields are ignored.'),
+      script: z.string().max(5000).optional().describe('Script mode: a single narration script with {{N}} step markers (0-indexed) for synchronized narration. Steps execute when narration reaches each marker. When provided, per-step "narration" fields are ignored. Best for an even tempo (one voice track); start it with {{0}}. With provider "elevenlabs" markers land on the exact word (character timestamps).'),
+      pronunciations: z.record(z.string(), z.union([z.string(), z.object({ alias: z.string().optional(), ipa: z.string().optional(), caseSensitive: z.boolean().optional() })])).optional().describe('Word -> how to say it, e.g. {"PageBolt": "page bolt"}. Works with every provider (IPA is Azure only).'),
     }).optional().describe('Audio Guide TTS settings. Two modes: (1) Per-step — add "narration" to individual steps. (2) Script — provide "script" with {{N}} markers for continuous narration synchronized to steps.'),
     variables: z.record(z.string()).optional().describe('Key-value map for variable substitution in step URLs/values. E.g. { "base_url": "https://example.com" } replaces {{base_url}} in steps.'),
     async: z.boolean().optional().describe('Render via an async job for reliability. The video is enqueued (202 + job_id) and this tool polls until it finishes, so long recordings do not hit the API\'s per-request timeout. The finished video is delivered as a private hosted URL (its bytes cannot be pulled back via the API key). Set false to force a single blocking synchronous request that returns the video INLINE (base64 embedded + saved to saveTo). DEFAULT: true, except when you pass saveTo (then sync is used so the file is actually produced on disk). If async is unavailable on your plan, it automatically falls back to sync. Quota is charged only on success; max 5 pending jobs per account.'),
@@ -899,7 +952,12 @@ server.tool(
       return { content: [{ type: 'text', text: 'Error: "steps" must be a non-empty array.' }], isError: true };
     }
 
-    const { saveTo, async: asyncOpt, pollTimeoutMs, ...apiParams } = params;
+    const { saveTo, async: asyncOpt, pollTimeoutMs, ...rawApiParams } = params;
+    // ElevenLabs (bring your own key): the key goes in the X-ElevenLabs-Key header, never the body.
+    const { body: apiParams, headers: byokHeaders } = elevenLabsRouting(rawApiParams);
+    if (apiParams.audioGuide && apiParams.audioGuide.provider === 'elevenlabs' && !byokHeaders['X-ElevenLabs-Key']) {
+      return { content: [{ type: 'text', text: 'Error: audioGuide.provider "elevenlabs" needs the user\'s ElevenLabs API key. Set ELEVENLABS_API_KEY in this MCP server\'s environment (preferred: the key never enters the chat), or pass audioGuide.elevenlabs.apiKey. PageBolt never stores it.' }], isError: true };
+    }
     const format = params.format || 'mp4';
     const ext = format === 'gif' ? 'gif' : format;
     const mimeType = videoMimeType(ext);
@@ -958,6 +1016,7 @@ server.tool(
       const res = await callApi('/api/v1/video', {
         method: 'POST',
         body: { ...apiParams, response_type: 'json' },
+        headers: byokHeaders,
       });
       const data = await res.json();
       return deliverInline(data);
@@ -974,9 +1033,12 @@ server.tool(
         const res = await callApi('/api/v1/video', {
           method: 'POST',
           body: { ...apiParams, async: true },
+          headers: byokHeaders,
         });
         enqueue = await res.json();
       } catch (asyncErr) {
+        // An ElevenLabs refusal (bad key, voice, credits) is final: retrying sync would only repeat it.
+        if (/\[elevenlabs_/.test(asyncErr.message || '')) throw asyncErr;
         // Async likely unavailable (older API / plan) — fall back to sync.
         return await recordSync();
       }
@@ -1402,6 +1464,16 @@ server.tool(
     viewport: z.object({ width: z.number().int(), height: z.number().int() }).optional().describe('Viewport size.'),
     audioGuide: z.object({
       enabled: z.boolean().optional(),
+      provider: z.enum(['azure', 'openai', 'elevenlabs']).optional().describe('TTS provider. "elevenlabs" = the user\'s own ElevenLabs account; the key is NEVER saved: supply it at record time (ELEVENLABS_API_KEY).'),
+      elevenlabs: z.object({
+        voiceId: z.string().optional(),
+        voiceName: z.string().optional(),
+        modelId: z.string().optional(),
+        stability: z.number().min(0).max(1).optional(),
+        similarityBoost: z.number().min(0).max(1).optional(),
+        style: z.number().min(0).max(1).optional(),
+        speakerBoost: z.boolean().optional(),
+      }).optional().describe('ElevenLabs voice settings (no key: it is never saved).'),
       voice: z.string().optional(),
       speed: z.number().optional(),
       script: z.string().optional(),
@@ -1436,7 +1508,7 @@ server.tool(
     if (type === 'video') {
       if (params.pace !== undefined) payload.pace = params.pace;
       if (params.format) payload.format = params.format;
-      if (params.audioGuide) payload.audioGuide = params.audioGuide;
+      if (params.audioGuide) payload.audioGuide = stripElevenLabsKey(params.audioGuide);
     }
 
     const lines = [];
@@ -1709,6 +1781,41 @@ server.tool(
       };
     } catch (err) {
       return { content: [{ type: 'text', text: `List devices error: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════════
+// Tool: list_elevenlabs_voices
+// ═══════════════════════════════════════════════════════════════════
+server.tool(
+  'list_elevenlabs_voices',
+  'List the voices in the user\'s OWN ElevenLabs account (bring your own key), to pick audioGuide.elevenlabs.voiceId for record_video with provider "elevenlabs". Uses the ELEVENLABS_API_KEY env var of this MCP server; PageBolt uses the key for this call only and never stores it. Free (no PageBolt request charged). For a product demo, prefer a calm narration/explainer voice.',
+  {
+    search: z.string().max(100).optional().describe('Filter by name/description/labels, e.g. "narration" or "Rachel".'),
+  },
+  async ({ search }) => {
+    const key = elevenLabsKey();
+    if (!key) {
+      return { content: [{ type: 'text', text: 'Set ELEVENLABS_API_KEY in this MCP server\'s environment to list the user\'s ElevenLabs voices.' }], isError: true };
+    }
+    try {
+      const qs = search ? `?search=${encodeURIComponent(search)}` : '';
+      const res = await callApi(`/api/v1/elevenlabs/voices${qs}`, { headers: { 'X-ElevenLabs-Key': key } });
+      const data = await res.json();
+      const voices = Array.isArray(data.voices) ? data.voices : [];
+      const lines = voices.map((v) => {
+        const labels = v.labels && Object.keys(v.labels).length ? ` (${Object.values(v.labels).join(', ')})` : '';
+        return `  ${v.voice_id} — ${v.name || '?'} [${v.category || '?'}]${labels}`;
+      });
+      return {
+        content: [{
+          type: 'text',
+          text: `ElevenLabs voices (${voices.length}${data.has_more ? '+' : ''}):\n${lines.join('\n') || '  (none)'}\n\nUse with record_video: audioGuide: { enabled: true, provider: "elevenlabs", elevenlabs: { voiceId: "<id>" } }`,
+        }],
+      };
+    } catch (err) {
+      return { content: [{ type: 'text', text: `List ElevenLabs voices error: ${err.message}` }], isError: true };
     }
   }
 );
