@@ -5,6 +5,12 @@ All notable changes to the PageBolt MCP server are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.17.1]
+
+### Changed
+
+- **`highlight` default style is now `spotlight`** (dims everything except the element). `outline`, `pulse`, `glow` and `arrow` are still available via `style`.
+
 ## [1.17.0]
 
 ### Added
