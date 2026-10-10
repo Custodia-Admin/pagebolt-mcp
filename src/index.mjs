@@ -99,6 +99,7 @@ async function callApi(endpoint, options = {}) {
     ...(options.headers || {}),
   };
   const body = options.body ? JSON.stringify(options.body) : undefined;
+  const carriesElevenLabsKey = Object.keys(options.headers || {}).some((h) => h.toLowerCase() === 'x-elevenlabs-key');
 
   let lastError;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -129,9 +130,11 @@ async function callApi(endpoint, options = {}) {
         errorMsg = `HTTP ${res.status} ${res.statusText}`;
       }
       const httpErr = new Error(`PageBolt API error (${res.status}): ${errorMsg}`);
-      // A 4xx answer (bad request, auth, quota, ElevenLabs key refused) is final: sending it
-      // again only repeats the refusal. 5xx keeps the previous single retry.
-      httpErr.finalClientError = res.status >= 400 && res.status < 500;
+      // Only for requests that carry a customer's ElevenLabs key: a 4xx (key refused, voice
+      // missing, credits) is final, so the key is not sent a second time and the rejected-key
+      // budget is not spent twice. Every other request keeps the existing single retry after a
+      // 4xx (unchanged behaviour for existing scripts). 5xx / network keep the retry everywhere.
+      httpErr.finalClientError = carriesElevenLabsKey && res.status >= 400 && res.status < 500;
       throw httpErr;
     } catch (err) {
       clearTimeout(timer);

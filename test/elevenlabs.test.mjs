@@ -153,6 +153,56 @@ test('list_elevenlabs_voices calls the backend with the header and lists voices'
   } finally { delete process.env.ELEVENLABS_API_KEY; }
 });
 
+// R2: the "4xx is final" rule is scoped to requests that carry an ElevenLabs key. Every other
+// tool keeps the pre-existing behaviour (one retry after a 4xx), which the paying customer's
+// scripts were written against.
+test('non-ElevenLabs tools keep the old retry: a 4xx answer is retried once', async () => {
+  await withClient(async () => jsonResponse({ error: 'Bad request' }, { status: 400 }), async (client, calls) => {
+    const res = await client.callTool({ name: 'take_screenshot', arguments: { url: 'https://example.com' } });
+    assert.equal(res.isError, true);
+    assert.equal(calls.length, 2, 'take_screenshot 400 must be retried once, as before PR #6');
+  });
+});
+
+test('record_video with Azure narration keeps the old retry on a 4xx', async () => {
+  process.env.ELEVENLABS_API_KEY = EL_KEY; // set, but not used: provider is azure
+  try {
+    await withClient(async () => jsonResponse({ error: 'Bad request' }, { status: 400 }), async (client, calls) => {
+      const res = await client.callTool({ name: 'record_video', arguments: { async: false, steps: [{ action: 'navigate', url: 'https://example.com', narration: 'Hi' }], audioGuide: { enabled: true, voice: 'ava' } } });
+      assert.equal(res.isError, true);
+      assert.equal(calls.filter((c) => c.url.endsWith('/api/v1/video')).length, 2);
+    });
+  } finally { delete process.env.ELEVENLABS_API_KEY; }
+});
+
+test('a refused ElevenLabs key is sent once: no 4xx retry for record_video (sync) and list_elevenlabs_voices', async () => {
+  process.env.ELEVENLABS_API_KEY = EL_KEY;
+  try {
+    const refusal = async () => jsonResponse({ error: 'ElevenLabs rejected your API key.', code: 'elevenlabs_invalid_key', provider: 'elevenlabs' }, { status: 401 });
+    await withClient(refusal, async (client, calls) => {
+      const r1 = await client.callTool({ name: 'record_video', arguments: { async: false, steps: [{ action: 'navigate', url: 'https://example.com' }], audioGuide: { enabled: true, provider: 'elevenlabs', script: '{{0}} Hi.', elevenlabs: { voiceId: '21m00Tcm4TlvDq8ikWAM' } } } });
+      assert.equal(r1.isError, true);
+      assert.equal(calls.filter((c) => c.url.endsWith('/api/v1/video')).length, 1);
+      const r2 = await client.callTool({ name: 'list_elevenlabs_voices', arguments: {} });
+      assert.equal(r2.isError, true);
+      assert.equal(calls.filter((c) => c.url.includes('/api/v1/elevenlabs/voices')).length, 1);
+      assert.ok(!JSON.stringify([r1, r2]).includes(EL_KEY));
+    });
+  } finally { delete process.env.ELEVENLABS_API_KEY; }
+});
+
+test('an ElevenLabs request still gets the single retry on a 5xx / network error', async () => {
+  process.env.ELEVENLABS_API_KEY = EL_KEY;
+  try {
+    let n = 0;
+    await withClient(async () => (++n === 1 ? jsonResponse({ error: 'boom' }, { status: 500 }) : jsonResponse({ provider: 'elevenlabs', voices: [], has_more: false })), async (client, calls) => {
+      const res = await client.callTool({ name: 'list_elevenlabs_voices', arguments: {} });
+      assert.notEqual(res.isError, true, textOf(res));
+      assert.equal(calls.length, 2);
+    });
+  } finally { delete process.env.ELEVENLABS_API_KEY; }
+});
+
 test('export_sequence never echoes or saves an ElevenLabs key', async () => {
   await withClient(async (call) => jsonResponse({ id: 'seq_1', name: call.body && call.body.name }, { status: 201 }), async (client, calls) => {
     const res = await client.callTool({
